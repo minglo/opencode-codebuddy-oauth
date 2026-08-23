@@ -1,0 +1,31 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write   # OIDC：npm 侧已信任 GitHub Actions，无 token 也能发布
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - name: Skip if already published
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "$PKG"@"$VER" version >/dev/null 2>&1; then
+            echo "version $VER already published, skip"
+            echo "skip=true" >> "$GITHUB_ENV"
+          fi
+      - run: npm publish --provenance
+        if: env.skip != 'true'

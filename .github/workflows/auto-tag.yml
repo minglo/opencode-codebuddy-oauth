@@ -1,0 +1,31 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: echo "v=v$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+      - id: pkg
+        run: echo "name=$(node -p "require('./package.json').name")" >> $GITHUB_OUTPUT
+      - run: |
+          TAG="${{ steps.ver.outputs.v }}"
+          PKG="${{ steps.pkg.outputs.name }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG exists, skip"
+          elif npm view "$PKG"@"${TAG#v}" version >/dev/null 2>&1; then
+            echo "version ${TAG#v} already published, skip (bump version to publish)"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
