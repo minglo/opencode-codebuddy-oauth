@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # gh workflow run publish.yml 需要触发 workflow_dispatch 的权限
 
 jobs:
   tag:
@@ -28,4 +29,9 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag "$TAG"
             git push origin "$TAG"
+            # GITHUB_TOKEN 推的 tag 不触发 publish.yml(push 事件被防循环机制抑制),
+            # 显式 dispatch;--ref 指向刚推的 tag,checkout 即为待发布版本
+            gh workflow run publish.yml --ref "$TAG"
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}

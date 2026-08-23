@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # auto-tag 由 GITHUB_TOKEN 推 tag,其 push 事件不会触发本 workflow(防循环机制),
+  # 故由 auto-tag 打完 tag 后通过 gh workflow run 显式呼叫
+  workflow_dispatch:
 
 permissions:
   contents: read
