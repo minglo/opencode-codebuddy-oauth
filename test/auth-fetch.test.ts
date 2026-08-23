@@ -163,4 +163,59 @@ describe("auth-fetch", () => {
     await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("write-back failed"));
   });
+  describe("瞬时 400（11133）重试", () => {
+    const err11133 = JSON.stringify({ code:11133, msg:"Invalid request parameters", extError:{ code:"invalid_parameter_value" } });
+
+    it("首次 400+11133 重试后成功：fetch 共调用 2 次，最终 200", async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchSpy = vi.fn()
+          .mockResolvedValueOnce(new Response(err11133, { status: 400, headers: { "Content-Type": "application/json" } }))
+          .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+        (globalThis as any).fetch = fetchSpy;
+        const af = createAuthFetch(makeDeps());
+        const p = af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+        await vi.advanceTimersByTimeAsync(40000);
+        const res = await p;
+        expect(res.status).toBe(200);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally { vi.useRealTimers(); }
+    });
+    it("连续 11133 耗尽重试（共 5 次请求，退避 1/4/10/25s）后原样返回 400", async () => {
+      vi.useFakeTimers();
+      try {
+        const mk400 = () => new Response(err11133, { status: 400, headers: { "Content-Type": "application/json" } });
+        const fetchSpy = vi.fn().mockImplementation(async () => mk400());
+        (globalThis as any).fetch = fetchSpy;
+        const warnSpy = vi.fn();
+        const af = createAuthFetch(makeDeps({ logger: { debug:vi.fn(), info:vi.fn(), warn:warnSpy, error:vi.fn() } as any }));
+        const p = af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+        await vi.advanceTimersByTimeAsync(40000);
+        const res = await p;
+        expect(res.status).toBe(400);
+        expect(fetchSpy).toHaveBeenCalledTimes(5);
+        expect(warnSpy).toHaveBeenCalledTimes(4);
+        const body = await res.json();
+        expect(body.code).toBe(11133);
+      } finally { vi.useRealTimers(); }
+    });
+    it("非 11133 的 400 不重试（如 11101），一次返回", async () => {
+      const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code:11101, msg:"Non-stream chat request is currently not supported" }), { status: 400, headers: { "Content-Type": "application/json" } }));
+      (globalThis as any).fetch = fetchSpy;
+      const af = createAuthFetch(makeDeps());
+      const res = await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe(11101);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    it("非 JSON 的 400 body 不重试", async () => {
+      const fetchSpy = vi.fn().mockResolvedValue(new Response("plain bad request", { status: 400 }));
+      (globalThis as any).fetch = fetchSpy;
+      const af = createAuthFetch(makeDeps());
+      const res = await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("plain bad request");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });

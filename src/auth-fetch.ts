@@ -84,6 +84,28 @@ export function createAuthFetch(deps: AuthFetchDeps) {
         response = await doRequest(activeAuth);
       }
     }
+    // 瞬时 400（code 11133 invalid parameter value）重试：CodeBuddy 网关偶发把上游厂商的瞬时
+    // 校验失败包装成 11133 返回（实测为服务端侧故障窗口，DB 记录显示窗口可达 30s+，同构请求稍后
+    // 重发即成功）。body 为字符串 JSON 可幂等重发；400 到达即流未开始，无副作用。
+    // 退避总计 ≤40s：吸收秒级抖动与短故障窗；分钟级窗口仍会穿透并原样抛错。
+    const TRANSIENT_400_RETRIES = 4;
+    const RETRY_DELAYS_MS = [1000, 4000, 10000, 25000];
+    for (let attempt = 0; response.status === 400 && attempt < TRANSIENT_400_RETRIES; attempt++) {
+      const text = await response.text();
+      let code: unknown;
+      try { code = (JSON.parse(text) as any)?.code; } catch {}
+      if (code !== 11133) {
+        // 非瞬时错误的 400：不重试，原样返回
+        const h = new Headers(response.headers);
+        h.set("Content-Type", "application/json");
+        return new Response(text, { status: 400, headers: h });
+      }
+      if (init.signal?.aborted) break;
+      deps.logger?.warn(`upstream transient 400 (11133), retry ${attempt + 1}/${TRANSIENT_400_RETRIES}`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]));
+      if (init.signal?.aborted) break;
+      response = await doRequest(activeAuth);
+    }
     if (!response.ok) {
       const text = await response.text();
       const h = new Headers(response.headers);
