@@ -72,12 +72,10 @@ export function resolveServerUrl(cfg: Pick<CodeBuddyConfig,"endpoint"|"network">
 }
 
 export function getAuthJsonPath(): string {
+  // 与核心 Global.Path.data 对齐：所有平台统一走 xdgData
+  // https://github.com/sst/opencode/blob/dev/packages/core/src/global.ts
+  // https://github.com/sst/opencode/blob/dev/packages/opencode/src/auth/index.ts#L10
   const home = os.homedir();
-  if (process.platform === "darwin") return path.join(home, "Library", "Application Support", "opencode", "auth.json");
-  if (process.platform === "win32") {
-    const base = process.env.APPDATA || path.join(home, "AppData", "Roaming");
-    return path.join(base, "opencode", "auth.json");
-  }
   const xdg = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
   return path.join(xdg, "opencode", "auth.json");
 }
