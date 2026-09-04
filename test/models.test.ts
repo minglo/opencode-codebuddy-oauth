@@ -32,6 +32,24 @@ describe("models mapping", () => {
     expect(c.interleaved).toEqual({ field:"reasoning_content" });
     expect((c.variants as any).low).toEqual({ reasoningEffort:"low" });
   });
+  it("deepseek 三档 low/high/xhigh：UI 键 low/medium/high/max，max 键值取 max", () => {
+    const c = remoteModelToConfig({ id:"deepseek-v4-flash", name:"Deepseek-V4-Flash", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high","xhigh"] } } as any);
+    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" }, max:{ reasoningEffort:"max" } });
+    expect(Object.keys(c.variants)).toEqual(["low","medium","high","max"]);
+  });
+  it("glm low/high/max：max 键优先原生 max", () => {
+    const c = remoteModelToConfig({ id:"glm-5.3", name:"GLM", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high","max"] } } as any);
+    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" }, max:{ reasoningEffort:"max" } });
+  });
+  it("hy3 两档 low/high：medium 预填 high，无 max 键", () => {
+    const c = remoteModelToConfig({ id:"x", name:"X", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high"] } } as any);
+    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" } });
+  });
+  it("非 xhigh effort 原样透传", () => {
+    const c = remoteModelToConfig({ id:"x", name:"X", supportsReasoning:true, reasoning:{ supportedEfforts:["max","low"] } } as any);
+    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"low" }, max:{ reasoningEffort:"max" } });
+    expect(Object.keys(c.variants)).toEqual(["low","medium","max"]);
+  });
 });
 
 describe("DiscoveryCache", () => {

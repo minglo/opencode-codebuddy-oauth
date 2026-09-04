@@ -70,6 +70,7 @@ opencode providers login --provider codebuddy
 - **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（5 秒超时），提取 craft agent 的模型列表并写入 `provider.codebuddy.models`（5 分钟 TTL 缓存 + 并发单飞去重，401/403 不缓存）；API Key 模式下模型从 `opencode.json` 配置读取。
 - **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败（仅 OAuth 模式），调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次；`RefreshLock` 按 provider 单例去重并发刷新。过期 token 在请求发出前预刷新（5 分钟 skew），失败后有 15 秒冷却，避免冗余重试。
 - **瞬时 400（code 11133）自动重试** — CodeBuddy 网关偶发把上游厂商的瞬时校验失败包装成 HTTP 400 `{"code":11133,"msg":"Invalid request parameters"}` 返回（实测为服务端侧故障窗口，同构请求稍后重发即成功）。拦截器识别到该错误时按 **1s → 4s → 10s → 25s** 退避幂等重发（最多 4 次额外尝试，总等待 ≤40s），把偶发故障对对话的影响从「回合中断」降级为「无感重试」；其他 400（如 11101 参数解析错误）不受影响、原样透传。
+- **模型兼容** — 历史 `assistant` 缺 `reasoning_content` 补空串（code 11155 兜底：带 `tools` 请求要求回传该字段，上游可跳过推理导致 400；不带 `tools` 时服务端忽略，无副作用）；`variants` 固定归一 `low/medium/high/max`（`medium→high` 兜底，`max` 仅 `xhigh/max` 才设；实测 `high/xhigh` 同档约 1-4k thinking_tokens，`max` 约 8.5k）。
 - **SSE 缓冲** — 流式响应按阈值/换行/标点/最大延迟合并分块输出，降低 UI 渲染频率；`reasoning_content` 与 `content` 混排保留。
 - **session 级 `X-Conversation-ID` 稳定化** — 同一个 OpenCode session 内所有请求复用同一 UUID，跨 turn、跨 tool call 一致，提升上游 prompt cache 命中率（`session.compacted` / `session.deleted` 时清掉 LRU 条目）。
 - **环境自动切换** — 同一份插件同时支持 `copilot.tencent.com`（国内版，默认）和 `www.codebuddy.ai`（国际版）；可通过 `CODEBUDDY_NETWORK` 切换，或直接用 `CODEBUDDY_ENDPOINT` 覆盖完整 URL。
@@ -84,7 +85,7 @@ opencode providers login --provider codebuddy
 | ---- | ---- |
 | `config` | 注入 `codebuddy` provider（如缺失），解析服务器地址（含 baseURL 兜底覆写），OAuth 模式下用 `/v3/config` 填充 `models`。 |
 | `event` | 监听 `session.compacted` / `session.deleted`，淘汰对应的 conversationId LRU 条目。 |
-| `auth.loader` | 返回 `{ apiKey, baseURL, fetch }`；自定义 `fetch` 注入认证信息、处理 401/403 刷新重试、瞬时 400（11133）幂等重试、包装 SSE 缓冲。提供 `/connect` 的 OAuth 与 API Key 两种登录方法。 |
+| `auth.loader` | 返回 `{ apiKey, baseURL, fetch }`；自定义 `fetch` 注入认证信息、处理 401/403 刷新重试、瞬时 400（11133）幂等重试、11155 `reasoning_content` 补空串、包装 SSE 缓冲。提供 `/connect` 的 OAuth 与 API Key 两种登录方法。 |
 | `chat.headers` | 注入非认证 headers（`X-Conversation-ID`、B3、`X-Model-ID` 等），仅 `providerID === "codebuddy"` 时生效。 |
 
 请求流：
@@ -98,7 +99,7 @@ OpenCode 收集用户输入
   ▼  auth.loader.fetch
 叠加 Authorization / X-Tenant-Id / X-User-Id / X-Enterprise-Id，
 转发到 ${serverUrl}/v2/chat/completions，
-401/403 则刷新 token 后重试一次；400+11133（上游瞬时故障）按 1s→4s→10s→25s 幂等重发；
+401/403 则刷新 token 后重试一次；400+11133（上游瞬时故障）按 1s→4s→10s→25s 幂等重发；历史 assistant 缺 reasoning_content 补空串（11155）；
 SSE 流式响应经缓冲器输出
   │
   ▼  上游 CodeBuddy API
@@ -197,9 +198,11 @@ OAuth 模式下，插件加载时会调用 `GET ${serverUrl}/v3/config`（5 秒�
 | `supportsToolCall` | `tool_call` |
 | `supportsImages` + `disabledMultimodal` | `attachment`（两者皆真才启用） |
 | `supportsReasoning` | `reasoning: true` + `interleaved: { field: "reasoning_content" }` |
-| `reasoning.effort` / `defaultEffort` / `supportedEfforts` | `options.reasoningEffort` 与 `variants`（各 effort 一个变体） |
+| `reasoning.effort` / `defaultEffort` / `supportedEfforts` | `options.reasoningEffort` 与 `variants`（固定归一 `low/medium/high/max`：`medium→high` 兜底，`max` 仅 `xhigh/max` 才设） |
 
 合并行为（`mergeModelEntry`）：发现结果与用户在 `opencode.json` 中手动声明的模型条目合并，**用户声明优先**（已存在条目时，以用户字段覆盖自动生成的同名字段；`reasoning: false` 可显式关闭推理映射）。
+
+`variants` 归一（`src/models.ts`）：键固定为 UI 档 `low/medium/high/max`（opencode 核心按键渲染缺档补全）；值按 deepseek 官方 thinking_mode 映射，`medium→high`、`xhigh→high`，`max` 为唯一真正高于 `high` 的档（网关实测 `high/xhigh` 约 1-4k thinking_tokens 同档，`max` 约 8.5k，高 3-5 倍；metadata 无 `xhigh/max` 则不设 `max` 键）。
 
 缓存与降级（`DiscoveryCache`，`src/models.ts`）：
 
@@ -275,7 +278,7 @@ npm test             # vitest 全套
 │   ├── config.ts       # env 解析 + 地址优先级链
 │   ├── auth-state.ts   # OAuth 状态机
 │   ├── auth-flow.ts    # state 请求 / token 轮询 / 刷新 / RefreshLock
-│   ├── auth-fetch.ts   # fetch 拦截器：注入头 / 401-403 刷新重试 / 11133 瞬时 400 重试 / SSE 包装
+│   ├── auth-fetch.ts   # fetch 拦截器：注入头 / 401-403 刷新重试 / 11133 瞬时 400 重试 / 11155 reasoning_content 补空串 / SSE 包装
 │   ├── models.ts       # /v3/config 发现 + 格式转换 + DiscoveryCache
 │   ├── headers.ts      # X-Conversation-ID / B3 / X-Model-ID 等 22 头
 │   ├── sse-buffer.ts   # 流缓冲（reasoning/content 合并 flush）

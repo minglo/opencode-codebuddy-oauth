@@ -54,7 +54,30 @@ export function remoteModelToConfig(m: RemoteModel): Record<string,unknown> {
   const effort = m.reasoning?.defaultEffort ?? m.reasoning?.effort;
   if (effort) entry.options = { reasoningEffort: effort };
   const efforts = m.reasoning?.supportedEfforts;
-  if (efforts?.length) entry.variants = Object.fromEntries(efforts.map(e => [e, { reasoningEffort: e }]));
+  if (efforts?.length) {
+    // variants 键 = UI 档名（opencode 核心按键渲染、并向缺失标准档位补全，故固定补全到 low/medium/high/max）。
+    // 值 = 请求体 reasoning_effort，按 deepseek 官方映射（api-docs.deepseek.com/zh-cn/guides/thinking_mode）归一：
+    //   medium→high, xhigh→high；max 是唯一真正高出 high 的档（CodeBuddy metadata 的 xhigh 是 max 的展示名，非独立档）。
+    const order = ["low", "medium", "high", "max"];
+    const variants: Record<string, { reasoningEffort: string }> = {};
+    const pick = (...cands: string[]) => cands.find(c => efforts.includes(c));
+    for (const e of order) {
+      if (e === "medium") {
+        const hit = pick("medium", "high", "low");
+        if (hit) variants.medium = { reasoningEffort: hit };
+        continue;
+      }
+      if (e === "max") {
+        // 实测（codebuddy 网关，thinking_tokens）：high/xhigh≈1-4k（同档），max≈8.5k（高 3-5 倍）。
+        // metadata 含 xhigh/max 即发 "max"，否则不设此键。
+        if (pick("max") ?? pick("xhigh")) variants.max = { reasoningEffort: "max" };
+        continue;
+      }
+      const hit = pick(e);
+      if (hit) variants[e] = { reasoningEffort: hit };
+    }
+    entry.variants = variants;
+  }
   return entry;
 }
 export function mergeModelEntry(auto: Record<string,unknown>, existing: Record<string,unknown>): Record<string,unknown> {

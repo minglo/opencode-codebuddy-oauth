@@ -72,6 +72,32 @@ describe("auth-fetch", () => {
     const sent = JSON.parse(spy.mock.calls[0][1].body);
     expect(sent.stream_options).toEqual({ include_usage:false });
   });
+  it("11155 兜底：历史 assistant 缺 reasoning_content 补空串", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
+    const af = createAuthFetch(makeDeps());
+    const body = { stream:true, messages: [
+      { role:"user", content:"q" },
+      { role:"assistant", content:"a1" },
+      { role:"assistant", content:"a2", reasoning_content:"已有推理" },
+      { role:"assistant", content:null, tool_calls:[{ id:"c", type:"function", function:{ name:"f", arguments:"{}" } }] },
+      { role:"user", content:"q2" },
+    ] };
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify(body) } as any);
+    const sent = JSON.parse(spy.mock.calls[0][1].body);
+    // 补空串：仅缺字段的 assistant；已有值 / user / 其他角色不动
+    expect(sent.messages[1]).toMatchObject({ role:"assistant", reasoning_content:"" });
+    expect(sent.messages[2].reasoning_content).toBe("已有推理");
+    expect(sent.messages[3]).toMatchObject({ role:"assistant", reasoning_content:"" }); // tool_calls 消息同样要补
+    expect(sent.messages[0].reasoning_content).toBeUndefined();
+  });
+  it("非字符串 body / messages 非数组不炸", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
+    const af = createAuthFetch(makeDeps());
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    expect(spy.mock.calls[0][1].body).toBe(JSON.stringify({stream:true, stream_options:{ include_usage:true }}));
+  });
   it("非流式原样透传（不注入 stream_options）", async () => {
     const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
     (globalThis as any).fetch = spy;

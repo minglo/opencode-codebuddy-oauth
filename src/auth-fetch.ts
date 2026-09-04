@@ -64,6 +64,15 @@ export function createAuthFetch(deps: AuthFetchDeps) {
         try {
           const parsed = JSON.parse(body);
           if (parsed.stream === true && !parsed.stream_options) { parsed.stream_options = { include_usage: true }; body = JSON.stringify(parsed); }
+          // 11155 兜底：带 tools 的请求要求历史 assistant 回传 reasoning_content，
+          // 但上游可跳过推理（canDisableThinking）→ opencode 无内容可回传 → 服务端 400。
+          // 补空串即可满足校验（实测接受）；不带 tools 的请求该字段被服务端忽略，无副作用。
+          if (Array.isArray(parsed.messages)) {
+            for (const m of parsed.messages) {
+              if (m?.role === "assistant" && m.reasoning_content === undefined) m.reasoning_content = "";
+            }
+            body = JSON.stringify(parsed);
+          }
         } catch {}
       }
       return doFetch()(`${server.url}${chatCompletionsPath}`, { method: "POST", headers, body: body as BodyInit, signal: init.signal });
