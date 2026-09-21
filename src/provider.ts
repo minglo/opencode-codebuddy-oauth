@@ -1,6 +1,8 @@
 // src/provider.ts
 import { Model, Provider } from "@opencode/plugin";
 import type { Plugin } from "@opencode/plugin";
+import type { ProviderEditor } from "@opencode/plugin/promise/provider";
+import type { ModelEditor } from "@opencode/plugin/promise/model";
 import { DISCOVERY_CACHE_TTL_MS, PROVIDER_ID, domainForHost } from "./config.js";
 import { resolveCredential } from "./credentials.js";
 import { DEFAULT_MODEL, buildVariants, type RemoteModel } from "./models.js";
@@ -69,8 +71,7 @@ export async function registerProvider(ctx: Plugin.Context, state: PluginState):
         const e = event as any;
         if (e?.type !== "credential.switched" && e?.type !== "credential.updated") continue;
         if (e.type === "credential.switched" && e.data?.integrationID !== PROVIDER_ID) continue;
-        await load(ctx, state).catch(() => {});
-        await ctx.provider.reload().catch(() => {});
+        await refresh(ctx, state);
       }
     } catch { /* abort 或流结束 */ }
   })();
@@ -83,15 +84,23 @@ export async function registerProvider(ctx: Plugin.Context, state: PluginState):
   };
 }
 
+function sameModels(a: RemoteModel[] | null, b: RemoteModel[] | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((m, i) => m.id === b[i]?.id);
+}
+
 async function refresh(ctx: Plugin.Context, state: PluginState): Promise<void> {
+  const before = state.discovered;
   await load(ctx, state).catch(() => {});
-  await ctx.provider.reload().catch(() => {});
+  if (!sameModels(before, state.discovered)) await ctx.provider.reload().catch(() => {});   // M7：未变化不重建
 }
 
 async function load(ctx: Plugin.Context, state: PluginState): Promise<void> {
   const credential = await resolveCredential(ctx, state);
   if (!credential || credential.type !== "oauth" || !credential.access) {
-    state.discovered = state.discovered ?? [DEFAULT_MODEL];
+    // api 模式/无凭证：不发现，重置为 DEFAULT_MODEL（M3；对齐 V1 与 spec §5.3(4)）
+    state.discovered = [DEFAULT_MODEL];
     return;
   }
   try {
@@ -107,7 +116,7 @@ async function load(ctx: Plugin.Context, state: PluginState): Promise<void> {
   }
 }
 
-function applyProvider(editor: any, state: PluginState): void {
+function applyProvider(editor: ProviderEditor, state: PluginState): void {
   const existing = editor.get(PROVIDER_ID);
   const configuredBase = existing?.provider?.settings?.baseURL;
   if (!state.cfg.endpoint && state.cfg.network === "internal" && typeof configuredBase === "string") {
@@ -142,7 +151,7 @@ function modelsFor(state: PluginState): any[] {
   return (state.discovered ?? [DEFAULT_MODEL]).map((m) => remoteModelToInfo(m));
 }
 
-function applyModels(editor: any, state: PluginState): void {
+function applyModels(editor: ModelEditor, state: PluginState): void {
   for (const m of state.discovered ?? [DEFAULT_MODEL]) {
     editor.update(PROVIDER_ID, m.id, (draft: any) => {
       const info = remoteModelToInfo(m) as any;

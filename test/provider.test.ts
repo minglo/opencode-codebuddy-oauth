@@ -175,18 +175,29 @@ describe("registerProvider", () => {
     cleanup();
   });
 
-  it("TTL 定时器触发刷新，cleanup 清除", async () => {
+  it("TTL 定时器：发现变化才 reload，cleanup 清除（M7）", async () => {
     vi.useFakeTimers();
-    const { ctx, calls } = createMockCtx();
-    const state = makeTestState();
-    state.discovered = [DEFAULT_MODEL];
+    const initial = [{ id: "m-new", name: "New" }];
+    const getSpy = vi.fn(async () => initial);
+    const { ctx, calls } = createMockCtx({ credential: { type: "oauth", access: "tok", refresh: "r", expires: Date.now() + 3600_000 } });
+    const state = makeTestState({ discoveryCache: { get: getSpy } as any });
     const cleanup = await registerProvider(ctx, state);
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
-    expect(calls.reloads.provider).toBeGreaterThan(0);
-    cleanup();
+    expect(state.discovered).toBe(initial);
     const before = calls.reloads.provider;
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);   // 发现结果未变（同引用）→ 不 reload
     expect(calls.reloads.provider).toBe(before);
+
+    const next = [{ id: "m-newer", name: "Newer" }];
+    getSpy.mockResolvedValueOnce(next);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);   // 变化 → reload
+    expect(state.discovered).toBe(next);
+    expect(calls.reloads.provider).toBe(before + 1);
+
+    cleanup();
+    const after = calls.reloads.provider;
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(calls.reloads.provider).toBe(after);
   });
 
   it("注册后以 provider.reload 收敛 discovery 结果（I2）", async () => {
@@ -219,6 +230,26 @@ describe("registerProvider", () => {
     expect(draft.name).toBe("User Custom");
     expect(draft.limit.context).toBe(999);
     expect(draft.capabilities.tools).toBe(true);   // 插件填充缺失键
+    cleanup();
+  });
+
+  it("api key 凭证重置 discovered（M3）", async () => {
+    const { ctx } = createMockCtx({ credential: { type: "key", key: "ck" } });
+    const state = makeTestState();
+    state.discovered = [{ id: "old-model", name: "Old" }];
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toEqual([DEFAULT_MODEL]);
+    cleanup();
+  });
+
+  it("完全无凭证：provider 注册且模型非空（Review Focus #1）", async () => {
+    const { ctx, applyProviderTransforms } = createMockCtx();
+    const state = makeTestState();
+    const cleanup = await registerProvider(ctx, state);
+    const { editor, added } = makeProviderEditor();
+    applyProviderTransforms(editor);
+    expect(added).toHaveLength(1);
+    expect(added[0].models.some((m: any) => m.id === "auto")).toBe(true);
     cleanup();
   });
 });

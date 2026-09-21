@@ -167,6 +167,7 @@ describe("http.response", () => {
       request: new Request("https://x"), response: new Response(html, { status: 400, headers: { "content-type": "text/html" } }) };
     await triggerHook("http.response", e);
     expect(e.response.status).toBe(400);
+    expect(e.response.headers.get("content-type")).toBe("text/html");
     expect(await e.response.text()).toBe(html);
   });
 
@@ -307,5 +308,74 @@ describe("fix pass 回归", () => {
     cleanup();
     expect(calls.disposals.length).toBeGreaterThan(0);
     expect(calls.disposals.every((d) => d.mock.calls.length > 0)).toBe(true);
+  });
+
+  it("body 不可读时不写请求快照（M2）", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    const stream = new ReadableStream({ start(c) { c.error(new Error("boom")); } });
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x/v2/chat/completions", { method: "POST", body: stream, duplex: "half" }) };
+    await triggerHook("http.request", e);
+    expect(state.requestSnapshots.size).toBe(0);
+  });
+
+  it("FormData 请求 content-type 含 boundary 不被改写（M5）", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    const fd = new FormData();
+    fd.append("file", "hello");
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x/v2/chat/completions", { method: "POST", body: fd }) };
+    const original = e.request.headers.get("content-type");
+    await triggerHook("http.request", e);
+    expect(e.request.headers.get("content-type")).toBe(original);
+    expect(e.request.headers.get("content-type")).toContain("multipart/form-data");
+    expect(e.request.headers.get("content-type")).toContain("boundary=");
+  });
+
+  it("11133 重试耗尽：返回最后一次响应（M5）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: chatRequest({ stream: true, messages: [] }) };
+      await triggerHook("http.request", e);
+      const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } }));
+      vi.stubGlobal("fetch", fetchSpy);
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+      expect(e.response.status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("SSE timer flush 实际产出缓冲内容（M5）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState({ cfg: { ...makeTestState().cfg, sse: { enabled: true, threshold: 100, maxDelayMs: 50 } } });
+      await registerRequests(ctx, state);
+      const payload = sseLine({ reasoning_content: "碎片" });   // 无标点无换行 → 只能靠 timer flush
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: new Request("https://x"), response: new Response(payload, { headers: { "content-type": "text/event-stream" } }) };
+      await triggerHook("http.response", e);
+      const reader = e.response.body!.getReader();
+      const readPromise = reader.read();
+      await vi.advanceTimersByTimeAsync(60);
+      const { value } = await readPromise;
+      expect(new TextDecoder().decode(value)).toContain("碎片");
+      await reader.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

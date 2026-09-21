@@ -1,5 +1,6 @@
 // src/requests.ts — V2 session hooks + 事件订阅
 import type { Plugin } from "@opencode/plugin";
+import type { SessionHooks } from "@opencode/plugin/promise/session";
 import { buildRequestHeaders, buildAuthHeaders } from "./headers.js";
 import { resolveIdentity, decodeJwtPayload } from "./jwt.js";
 import { PROVIDER_ID } from "./config.js";
@@ -9,15 +10,18 @@ import { sleep } from "./auth-flow.js";
 import type { PluginState, RequestSnapshot } from "./state.js";
 
 type AnyEvent = any;
+type HttpRequestEvent = SessionHooks["http.request"];
+type HttpResponseEvent = SessionHooks["http.response"];
+type RetryEvent = SessionHooks["retry"];
 
 export async function registerRequests(ctx: Plugin.Context, state: PluginState): Promise<() => void> {
   const hooks = buildHooks(ctx, state);
   const registrations: Array<{ dispose: () => Promise<void> }> = [];
   registrations.push(await ctx.session.hook("http.request", hooks.onRequest, { providerID: PROVIDER_ID }));
   registrations.push(await ctx.session.hook("http.response", hooks.onResponse, { providerID: PROVIDER_ID }));
-  registrations.push(await ctx.session.hook("retry", (event: AnyEvent) => {
+  registrations.push(await ctx.session.hook("retry", (event: RetryEvent) => {
     state.logger.warn(
-      `codebuddy retry observed: type=${event?.error?.type} status=${event?.error?.status} attempt=${event?.attempt}`,
+      `codebuddy retry observed: type=${event.error.type} status=${event.error.status} attempt=${event.attempt}`,
     );
   }, { providerID: PROVIDER_ID }));
 
@@ -43,12 +47,12 @@ export async function registerRequests(ctx: Plugin.Context, state: PluginState):
 /** 供测试与非注册路径复用 */
 export function buildHooks(ctx: Plugin.Context, state: PluginState) {
   return {
-    onRequest: (event: AnyEvent) => handleHttpRequest(ctx, event, state),
-    onResponse: (event: AnyEvent) => handleHttpResponse(event, state),
+    onRequest: (event: HttpRequestEvent) => handleHttpRequest(ctx, event, state),
+    onResponse: (event: HttpResponseEvent) => handleHttpResponse(event, state),
   };
 }
 
-async function handleHttpRequest(ctx: Plugin.Context, event: AnyEvent, state: PluginState): Promise<void> {
+async function handleHttpRequest(ctx: Plugin.Context, event: HttpRequestEvent, state: PluginState): Promise<void> {
   const headers: Headers = event.request.headers;
 
   const credential = await resolveCredential(ctx, state);
@@ -67,7 +71,7 @@ async function handleHttpRequest(ctx: Plugin.Context, event: AnyEvent, state: Pl
     state.logger.warn("codebuddy: 无凭证，跳过鉴权头注入（请 /connect codebuddy）");
   }
 
-  const reqHeaders = buildRequestHeaders(event.sessionID, event.model?.id, {
+  const reqHeaders = buildRequestHeaders(event.sessionID, event.model.id, {
     cfg: state.cfg, server: state.server, lru: state.conversationIds,
   });
   for (const [k, v] of Object.entries(reqHeaders)) {
@@ -77,7 +81,8 @@ async function handleHttpRequest(ctx: Plugin.Context, event: AnyEvent, state: Pl
   }
 
   let bodyText: string | undefined;
-  try { bodyText = await event.request.clone().text(); } catch { bodyText = undefined; }
+  let bodyReadFailed = false;
+  try { bodyText = await event.request.clone().text(); } catch { bodyText = undefined; bodyReadFailed = true; }
 
   let nextBody: string | undefined;
   if (bodyText) {
@@ -105,7 +110,8 @@ async function handleHttpRequest(ctx: Plugin.Context, event: AnyEvent, state: Pl
   }
 
   const traceId = headers.get("X-Request-Trace-Id");
-  if (traceId) {
+  if (traceId && !bodyReadFailed) {
+    // body 不可读时不写快照，11133 将走"无快照 → 原样返回"安全路径（M2）
     const snapshot: RequestSnapshot = {
       url: event.request.url,
       method: event.request.method,
@@ -131,7 +137,7 @@ function withSseBuffer(response: Response, state: PluginState): Response {
   });
 }
 
-async function handleHttpResponse(event: AnyEvent, state: PluginState): Promise<void> {
+async function handleHttpResponse(event: HttpResponseEvent, state: PluginState): Promise<void> {
   const response: Response = event.response;
 
   if (response.status === 400) {
@@ -142,13 +148,12 @@ async function handleHttpResponse(event: AnyEvent, state: PluginState): Promise<
       try { code = (JSON.parse(text) as any)?.code; } catch { /* 非 JSON */ }
 
       if (code === 11133) {
-        const traceId = event.request?.headers?.get?.("X-Request-Trace-Id");
+        const traceId = event.request.headers.get("X-Request-Trace-Id");
         const snapshot = traceId ? state.requestSnapshots.get(traceId) : undefined;
         if (!snapshot) {
           state.logger.warn("codebuddy: 11133 但无请求快照，原样返回");
           return;
-        }
-        const signal: AbortSignal | undefined = event.request?.signal;
+        }        const signal: AbortSignal = event.request.signal;
         const retrySignal = signal
           ? AbortSignal.any([signal, AbortSignal.timeout(RETRY_TIMEOUT_MS)])
           : AbortSignal.timeout(RETRY_TIMEOUT_MS);
@@ -180,11 +185,8 @@ async function handleHttpResponse(event: AnyEvent, state: PluginState): Promise<
         event.response = last;
         return;
       }
-    }
-    if (text !== undefined) {
-      const h = new Headers(response.headers);
-      h.set("Content-Type", "application/json");
-      event.response = new Response(text, { status: 400, headers: h });
+      // 非 11133 的 400：clone 读取不破坏原响应，原样返回（M1）
+      event.response = response;
       return;
     }
   }

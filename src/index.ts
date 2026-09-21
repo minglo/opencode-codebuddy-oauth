@@ -13,20 +13,22 @@ export default Plugin.define({
   id: "codebuddy",
   async setup(ctx) {
     const cfg = getConfig();
-    const state: PluginState = {
+    // definite assignment：fetchFn 只在请求发生时读取 state.server（此时已赋值），
+    // 闭包保证 provider 覆写 state.server 后同源（live）
+    let state!: PluginState;
+    const discoveryCache = new DiscoveryCache({
+      ttlMs: DISCOVERY_CACHE_TTL_MS,
+      fetchFn: (token, signal) => fetchRemoteModels(token, state.server, signal),
+    });
+    state = {
       cfg,
       logger: createLogger(),
       server: resolveServerUrl(cfg),
       conversationIds: new LRUMap<string, string>(cfg.conversationMapMax),
-      discoveryCache: null as unknown as DiscoveryCache,
+      discoveryCache,
       discovered: null,
       requestSnapshots: new LRUMap<string, RequestSnapshot>(32),
     };
-    // fetchFn 闭包读 state.server 属性（live），provider 覆写后同源
-    state.discoveryCache = new DiscoveryCache({
-      ttlMs: DISCOVERY_CACHE_TTL_MS,
-      fetchFn: (token, signal) => fetchRemoteModels(token, state.server, signal),
-    });
 
     const cleanups: Array<() => void> = [];
     const domain = async (name: string, fn: () => Promise<void | (() => void)>) => {
