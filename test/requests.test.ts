@@ -188,3 +188,56 @@ describe("http.response", () => {
     }
   });
 });
+
+describe("retry + 事件订阅", () => {
+  it("retry hook 注册且仅记录日志", async () => {
+    const { ctx, calls } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    expect(calls.hooks.has("retry")).toBe(true);
+    const err = { error: { type: "provider.invalid-request", status: 400, message: "x" }, attempt: 2, decision: { retry: false } };
+    await calls.hooks.get("retry")!(err);
+    expect(state.logger.info).toHaveBeenCalled();
+  });
+
+  it("session.compacted 清 conversationIds", async () => {
+    let pushEvent: ((e: any) => void) | null = null;
+    const { ctx, triggerHook } = createMockCtx({
+      credential: { type: "key", key: "k" },
+      subscription: () => (async function* () {
+        while (true) {
+          const next = await new Promise<any>((resolve) => { pushEvent = resolve; });
+          yield next;
+        }
+      })(),
+    });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+
+    const e: any = { sessionID: "sess-x", model: { providerID: "codebuddy", id: "auto" }, kind: "primary", request: chatRequest({ messages: [] }) };
+    await triggerHook("http.request", e);
+    expect(state.conversationIds.get("sess-x")).toBeTruthy();
+
+    pushEvent!({ type: "session.compacted", data: { sessionID: "sess-x" } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(state.conversationIds.get("sess-x")).toBeUndefined();
+  });
+
+  it("cleanup 中止订阅", async () => {
+    let aborted = false;
+    const { ctx } = createMockCtx({
+      subscription: (signal: AbortSignal) => (async function* () {
+        if (signal.aborted) { aborted = true; return; }
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+        });
+      })(),
+    });
+    const state = makeTestState();
+    const cleanup = await registerRequests(ctx, state);
+    await new Promise((r) => setTimeout(r, 0));   // 让消费循环进入首次 next()
+    cleanup();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(aborted).toBe(true);
+  });
+});

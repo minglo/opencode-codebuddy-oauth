@@ -14,7 +14,26 @@ export async function registerRequests(ctx: Plugin.Context, state: PluginState):
   const hooks = buildHooks(ctx, state);
   await ctx.session.hook("http.request", hooks.onRequest, { providerID: PROVIDER_ID });
   await ctx.session.hook("http.response", hooks.onResponse, { providerID: PROVIDER_ID });
-  return () => {};
+  await ctx.session.hook("retry", (event: AnyEvent) => {
+    state.logger.info(
+      `codebuddy retry observed: type=${event?.error?.type} status=${event?.error?.status} attempt=${event?.attempt}`,
+    );
+  }, { providerID: PROVIDER_ID });
+
+  const controller = new AbortController();
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        const e = event as AnyEvent;
+        if (e?.type === "session.compacted" || e?.type === "session.deleted") {
+          const sid = e?.data?.sessionID;
+          if (sid) state.conversationIds.delete(sid);
+        }
+      }
+    } catch { /* abort 或流结束 */ }
+  })();
+
+  return () => controller.abort();
 }
 
 /** 供测试与非注册路径复用 */
