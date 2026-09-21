@@ -4,6 +4,8 @@ import { buildRequestHeaders, buildAuthHeaders } from "./headers.js";
 import { resolveIdentity, decodeJwtPayload } from "./jwt.js";
 import { PROVIDER_ID } from "./config.js";
 import { resolveCredential } from "./credentials.js";
+import { createSSEBufferedStream } from "./sse-buffer.js";
+import { sleep } from "./auth-flow.js";
 import type { PluginState, RequestSnapshot } from "./state.js";
 
 type AnyEvent = any;
@@ -11,6 +13,7 @@ type AnyEvent = any;
 export async function registerRequests(ctx: Plugin.Context, state: PluginState): Promise<() => void> {
   const hooks = buildHooks(ctx, state);
   await ctx.session.hook("http.request", hooks.onRequest, { providerID: PROVIDER_ID });
+  await ctx.session.hook("http.response", hooks.onResponse, { providerID: PROVIDER_ID });
   return () => {};
 }
 
@@ -18,6 +21,7 @@ export async function registerRequests(ctx: Plugin.Context, state: PluginState):
 export function buildHooks(ctx: Plugin.Context, state: PluginState) {
   return {
     onRequest: (event: AnyEvent) => handleHttpRequest(ctx, event, state),
+    onResponse: (event: AnyEvent) => handleHttpResponse(event, state),
   };
 }
 
@@ -83,4 +87,64 @@ async function handleHttpRequest(ctx: Plugin.Context, event: AnyEvent, state: Pl
     };
     state.requestSnapshots.set(traceId, snapshot);
   }
+}
+
+const RETRY_DELAYS_MS = [1000, 4000, 10000, 25000];
+
+function withSseBuffer(response: Response, state: PluginState): Response {
+  const { sse } = state.cfg;
+  if (!sse.enabled || !response.body) return response;
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) return response;
+  const buffered = createSSEBufferedStream(response.body as ReadableStream<Uint8Array>, {
+    threshold: sse.threshold, maxDelayMs: sse.maxDelayMs,
+  });
+  return new Response(buffered as unknown as BodyInit, {
+    status: response.status, statusText: response.statusText, headers: response.headers,
+  });
+}
+
+async function handleHttpResponse(event: AnyEvent, state: PluginState): Promise<void> {
+  const response: Response = event.response;
+
+  if (response.status === 400) {
+    let text: string | undefined;
+    try { text = await response.clone().text(); } catch { text = undefined; }
+    if (text !== undefined) {
+      let code: unknown;
+      try { code = (JSON.parse(text) as any)?.code; } catch { /* 非 JSON */ }
+
+      if (code === 11133) {
+        const traceId = event.request?.headers?.get?.("X-Request-Trace-Id");
+        const snapshot = traceId ? state.requestSnapshots.get(traceId) : undefined;
+        if (!snapshot) {
+          state.logger.warn("codebuddy: 11133 但无请求快照，原样返回");
+          return;
+        }
+        let last: Response = response;
+        for (const delay of RETRY_DELAYS_MS) {
+          await sleep(delay);
+          const retryRes = await fetch(snapshot.url, { method: snapshot.method, headers: snapshot.headers, body: snapshot.body });
+          if (retryRes.ok) {
+            event.response = withSseBuffer(retryRes, state);
+            return;
+          }
+          last = retryRes;
+          const retryText = await retryRes.clone().text();
+          let retryCode: unknown;
+          try { retryCode = (JSON.parse(retryText) as any)?.code; } catch { /* 非 JSON */ }
+          if (retryCode !== 11133) break;
+        }
+        event.response = last;
+        return;
+      }
+    }
+    if (text !== undefined) {
+      const h = new Headers(response.headers);
+      h.set("Content-Type", "application/json");
+      event.response = new Response(text, { status: 400, headers: h });
+      return;
+    }
+  }
+
+  event.response = withSseBuffer(response, state);
 }

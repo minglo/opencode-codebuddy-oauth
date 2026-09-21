@@ -100,3 +100,91 @@ describe("http.request", () => {
     expect(JSON.parse(snap!.body).stream_options).toEqual({ include_usage: true });
   });
 });
+
+function sseLine(delta: Record<string, unknown>): string {
+  return `data: ${JSON.stringify({ id: "1", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`;
+}
+
+describe("http.response", () => {
+  it("SSE 流被合并（threshold 触发）", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState({ cfg: { ...makeTestState().cfg, sse: { enabled: true, threshold: 100, maxDelayMs: 50 } } });
+    await registerRequests(ctx, state);
+    const payload = sseLine({ reasoning_content: "你好。" }) + sseLine({ content: "世界。" }) + "data: [DONE]\n\n";
+    const res = new Response(payload, { headers: { "content-type": "text/event-stream" } });
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x"), response: res };
+    await triggerHook("http.response", e);
+    const text = await e.response.text();
+    expect(text).toContain("你好。");
+    expect(text).toContain("世界。");
+    expect(text).toContain("[DONE]");
+  });
+
+  it("SSE 被禁用时原样返回", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState({ cfg: { ...makeTestState().cfg, sse: { enabled: false, threshold: 100, maxDelayMs: 50 } } });
+    await registerRequests(ctx, state);
+    const payload = sseLine({ content: "a" });
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x"), response: new Response(payload, { headers: { "content-type": "text/event-stream" } }) };
+    await triggerHook("http.response", e);
+    expect(await e.response.text()).toBe(payload);
+  });
+
+  it("11133 用快照重发，成功后替换响应", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: chatRequest({ stream: true, messages: [] }) };
+      await triggerHook("http.request", e);   // 建立快照
+      const fetches: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (input: any) => {
+        fetches.push(String(input));
+        return new Response(JSON.stringify({ code: 0, ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }));
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(fetches).toHaveLength(1);
+      expect(e.response.status).toBe(200);
+      expect(await e.response.text()).toContain('"ok":true');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("非 JSON 的 400 原样返回（HTML 网关错误页）", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    const html = "<html>Bad Gateway</html>";
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x"), response: new Response(html, { status: 400, headers: { "content-type": "text/html" } }) };
+    await triggerHook("http.response", e);
+    expect(e.response.status).toBe(400);
+    expect(await e.response.text()).toBe(html);
+  });
+
+  it("SSE 流被提前取消后定时 flush 不崩", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState({ cfg: { ...makeTestState().cfg, sse: { enabled: true, threshold: 100, maxDelayMs: 50 } } });
+      await registerRequests(ctx, state);
+      const payload = sseLine({ reasoning_content: "碎片" });   // 未达 threshold、无标点 → 只能靠 timer flush
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: new Request("https://x"), response: new Response(payload, { headers: { "content-type": "text/event-stream" } }) };
+      await triggerHook("http.response", e);
+      const reader = e.response.body!.getReader();
+      await reader.cancel();                     // 不 read：timer flush 尚未产出，直接取消
+      await vi.advanceTimersByTimeAsync(200);    // timer 在已取消的流上触发，必须有 try/catch 兜住
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
