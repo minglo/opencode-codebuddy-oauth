@@ -37,3 +37,147 @@ describe("remoteModelToInfo", () => {
     expect(info.capabilities.input).not.toContain("image");
   });
 });
+
+import { vi, afterEach } from "vitest";
+import { registerProvider } from "../src/provider.js";
+import { createMockCtx, jsonResponse, makeProviderEditor, makeModelEditor, makeTestState } from "./helpers/mock-ctx.js";
+import { DiscoveryCache, DEFAULT_MODEL } from "../src/models.js";
+
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+function discoveryResponse(models: any[]) {
+  return jsonResponse({ code: 0, data: { agents: [{ name: "craft", models: models.map((m) => m.id) }], models } });
+}
+
+describe("registerProvider", () => {
+  it("无凭证：注册 provider（含 DEFAULT_MODEL）且不抛", async () => {
+    const { ctx, applyProviderTransforms, calls } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    const { editor, added } = makeProviderEditor();
+    applyProviderTransforms(editor);
+    expect(added).toHaveLength(1);
+    const info = added[0].info;
+    expect(info.name).toBe("CodeBuddy");
+    expect(info.activation).toBe("enabled");
+    expect(info.integrationID).toBe("codebuddy");
+    expect(info.package).toBe("@opencode/ai/providers/openai-compatible");
+    expect(info.settings.baseURL).toContain("/v2");
+    expect(added[0].models.length).toBeGreaterThan(0);
+    expect(calls.subscriptions.length).toBeGreaterThan(0);
+    cleanup();
+  });
+
+  it("已有 provider 时走 update 并合并 settings", async () => {
+    const { ctx, applyProviderTransforms } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    const seed = { provider: { id: "codebuddy", name: "old", settings: { setCacheKey: true }, integrationID: undefined as any } };
+    const { editor, added, updates } = makeProviderEditor(seed);
+    applyProviderTransforms(editor);
+    expect(added).toHaveLength(0);
+    expect(updates).toContain("codebuddy");
+    expect(seed.provider.settings.setCacheKey).toBe(true);
+    expect(seed.provider.settings.baseURL).toContain("/v2");
+    expect(seed.provider.integrationID).toBe("codebuddy");
+    cleanup();
+  });
+
+  it("configuredBase 覆写 server（ENDPOINT 未设、NETWORK 默认 internal）", async () => {
+    delete process.env.CODEBUDDY_ENDPOINT;
+    delete process.env.CODEBUDDY_NETWORK;
+    const { ctx, applyProviderTransforms } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    const seed = { provider: { id: "codebuddy", name: "x", settings: { baseURL: "https://my-proxy.example.com/v2" }, integrationID: undefined as any } };
+    const { editor } = makeProviderEditor(seed);
+    applyProviderTransforms(editor);
+    expect(seed.provider.settings.baseURL).toBe("https://my-proxy.example.com/v2");
+    cleanup();
+  });
+
+  it("ENDPOINT 已设时 configuredBase 不覆写", async () => {
+    process.env.CODEBUDDY_ENDPOINT = "https://env.example.com";
+    try {
+      const { ctx, applyProviderTransforms } = createMockCtx();
+      const state = makeTestState();
+      state.discovered = [DEFAULT_MODEL];
+      const cleanup = await registerProvider(ctx, state);
+      const seed = { provider: { id: "codebuddy", name: "x", settings: { baseURL: "https://base.example.com/v2" }, integrationID: undefined as any } };
+      const { editor } = makeProviderEditor(seed);
+      applyProviderTransforms(editor);
+      expect(seed.provider.settings.baseURL).toBe("https://env.example.com/v2");
+      cleanup();
+    } finally {
+      delete process.env.CODEBUDDY_ENDPOINT;
+    }
+  });
+
+  it("api key 凭证：不发现，注入 DEFAULT_MODEL", async () => {
+    const fetchSpy = vi.fn(async () => discoveryResponse([]));
+    vi.stubGlobal("fetch", fetchSpy);
+    const { ctx, applyProviderTransforms } = createMockCtx({ credential: { type: "key", key: "ck_x" } });
+    const state = makeTestState();
+    const cleanup = await registerProvider(ctx, state);
+    const { editor, added } = makeProviderEditor();
+    applyProviderTransforms(editor);
+    expect(added).toHaveLength(1);
+    expect(added[0].models.some((m: any) => m.id === "auto")).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it("发现成功：模型经 model transform 注入", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => discoveryResponse([
+      { id: "m1", name: "M1", supportsToolCall: true, maxInputTokens: 1000, maxOutputTokens: 10 },
+    ])));
+    const { ctx, applyProviderTransforms, applyModelTransforms } = createMockCtx({ credential: { type: "oauth", access: "tok", refresh: "r", expires: Date.now() + 3600_000 } });
+    const state = makeTestState({
+      discoveryCache: new DiscoveryCache({ ttlMs: 60_000, fetchFn: (token) => (globalThis.fetch as any)(`https://copilot.tencent.com/v3/config?t=${token}`).then((r: Response) => r.json()).then((b: any) => b.data.models) }),
+    });
+    const cleanup = await registerProvider(ctx, state);
+    const p = makeProviderEditor();
+    applyProviderTransforms(p.editor);
+    const m = makeModelEditor();
+    applyModelTransforms(m.editor);
+    expect(m.updates.some((u) => u.modelID === "m1")).toBe(true);
+    cleanup();
+  });
+
+  it("credential.switched 事件触发 provider.reload", async () => {
+    let pushEvent: ((e: any) => void) | null = null;
+    const { ctx, calls } = createMockCtx({
+      subscription: () => (async function* () {
+        while (true) {
+          const next = await new Promise<any>((resolve) => { pushEvent = resolve; });
+          yield next;
+        }
+      })(),
+    });
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    pushEvent!({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: "c1" } });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.reloads.provider).toBeGreaterThan(0);
+    cleanup();
+  });
+
+  it("TTL 定时器触发刷新，cleanup 清除", async () => {
+    vi.useFakeTimers();
+    const { ctx, calls } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+    expect(calls.reloads.provider).toBeGreaterThan(0);
+    cleanup();
+    const before = calls.reloads.provider;
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(calls.reloads.provider).toBe(before);
+  });
+});
