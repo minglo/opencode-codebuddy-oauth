@@ -54,9 +54,13 @@ export function remoteModelToInfo(m: RemoteModel, providerID: string = PROVIDER_
 }
 
 export async function registerProvider(ctx: Plugin.Context, state: PluginState): Promise<() => void> {
+  const registrations: Array<{ dispose: () => Promise<void> }> = [];
+  // 先注册 provider transform：真实宿主注册即执行回调（configuredBase 覆写 server），
+  // 之后的 discovery 才用覆写后的 server——对齐 V1 顺序（e2e #9 最终验证）
+  registrations.push(await ctx.provider.transform((editor) => applyProvider(editor, state)));
   await load(ctx, state);
-  await ctx.provider.transform((editor) => applyProvider(editor, state));
-  await ctx.model.transform((editor) => applyModels(editor, state));
+  await ctx.provider.reload().catch(() => {});   // 用 discovery 结果重建 provider 的 models
+  registrations.push(await ctx.model.transform((editor) => applyModels(editor, state)));
 
   const controller = new AbortController();
   void (async () => {
@@ -72,7 +76,11 @@ export async function registerProvider(ctx: Plugin.Context, state: PluginState):
   })();
 
   const timer = setInterval(() => { void refresh(ctx, state); }, DISCOVERY_CACHE_TTL_MS);
-  return () => { controller.abort(); clearInterval(timer); };
+  return () => {
+    controller.abort();
+    clearInterval(timer);
+    for (const r of registrations) void r.dispose();
+  };
 }
 
 async function refresh(ctx: Plugin.Context, state: PluginState): Promise<void> {
@@ -136,6 +144,12 @@ function modelsFor(state: PluginState): any[] {
 
 function applyModels(editor: any, state: PluginState): void {
   for (const m of state.discovered ?? [DEFAULT_MODEL]) {
-    editor.update(PROVIDER_ID, m.id, (draft: any) => { Object.assign(draft, remoteModelToInfo(m)); });
+    editor.update(PROVIDER_ID, m.id, (draft: any) => {
+      const info = remoteModelToInfo(m) as any;
+      // 已有（用户）配置优先，仅填充缺失键——对齐 V1 mergeModelEntry 语义（e2e #8）
+      for (const [k, v] of Object.entries(info)) {
+        if (draft[k] === undefined) draft[k] = v;
+      }
+    });
   }
 }

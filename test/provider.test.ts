@@ -86,20 +86,28 @@ describe("registerProvider", () => {
   });
 
   it("configuredBase 覆写 server（ENDPOINT 未设、NETWORK 默认 internal）", async () => {
+    const savedEndpoint = process.env.CODEBUDDY_ENDPOINT;
+    const savedNetwork = process.env.CODEBUDDY_NETWORK;
     delete process.env.CODEBUDDY_ENDPOINT;
     delete process.env.CODEBUDDY_NETWORK;
-    const { ctx, applyProviderTransforms } = createMockCtx();
-    const state = makeTestState();
-    state.discovered = [DEFAULT_MODEL];
-    const cleanup = await registerProvider(ctx, state);
-    const seed = { provider: { id: "codebuddy", name: "x", settings: { baseURL: "https://my-proxy.example.com/v2" }, integrationID: undefined as any } };
-    const { editor } = makeProviderEditor(seed);
-    applyProviderTransforms(editor);
-    expect(seed.provider.settings.baseURL).toBe("https://my-proxy.example.com/v2");
-    cleanup();
+    try {
+      const { ctx, applyProviderTransforms } = createMockCtx();
+      const state = makeTestState();
+      state.discovered = [DEFAULT_MODEL];
+      const cleanup = await registerProvider(ctx, state);
+      const seed = { provider: { id: "codebuddy", name: "x", settings: { baseURL: "https://my-proxy.example.com/v2" }, integrationID: undefined as any } };
+      const { editor } = makeProviderEditor(seed);
+      applyProviderTransforms(editor);
+      expect(seed.provider.settings.baseURL).toBe("https://my-proxy.example.com/v2");
+      cleanup();
+    } finally {
+      if (savedEndpoint === undefined) delete process.env.CODEBUDDY_ENDPOINT; else process.env.CODEBUDDY_ENDPOINT = savedEndpoint;
+      if (savedNetwork === undefined) delete process.env.CODEBUDDY_NETWORK; else process.env.CODEBUDDY_NETWORK = savedNetwork;
+    }
   });
 
   it("ENDPOINT 已设时 configuredBase 不覆写", async () => {
+    const savedEndpoint = process.env.CODEBUDDY_ENDPOINT;
     process.env.CODEBUDDY_ENDPOINT = "https://env.example.com";
     try {
       const { ctx, applyProviderTransforms } = createMockCtx();
@@ -112,7 +120,7 @@ describe("registerProvider", () => {
       expect(seed.provider.settings.baseURL).toBe("https://env.example.com/v2");
       cleanup();
     } finally {
-      delete process.env.CODEBUDDY_ENDPOINT;
+      if (savedEndpoint === undefined) delete process.env.CODEBUDDY_ENDPOINT; else process.env.CODEBUDDY_ENDPOINT = savedEndpoint;
     }
   });
 
@@ -179,5 +187,38 @@ describe("registerProvider", () => {
     const before = calls.reloads.provider;
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     expect(calls.reloads.provider).toBe(before);
+  });
+
+  it("注册后以 provider.reload 收敛 discovery 结果（I2）", async () => {
+    const { ctx, calls } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    expect(calls.reloads.provider).toBeGreaterThan(0);
+    cleanup();
+  });
+
+  it("cleanup 释放 provider/model transform dispose（I4）", async () => {
+    const { ctx, calls } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [DEFAULT_MODEL];
+    const cleanup = await registerProvider(ctx, state);
+    cleanup();
+    expect(calls.disposals.length).toBeGreaterThan(0);
+    expect(calls.disposals.every((d) => d.mock.calls.length > 0)).toBe(true);
+  });
+
+  it("model transform 保留已有（用户）字段（I5）", async () => {
+    const { ctx, applyModelTransforms } = createMockCtx();
+    const state = makeTestState();
+    state.discovered = [{ id: "m9", name: "M9", supportsToolCall: true, maxInputTokens: 1000, maxOutputTokens: 10 }];
+    const cleanup = await registerProvider(ctx, state);
+    const m = makeModelEditor({ name: "User Custom", limit: { context: 999, output: 1 } });
+    applyModelTransforms(m.editor);
+    const draft = m.drafts[0];
+    expect(draft.name).toBe("User Custom");
+    expect(draft.limit.context).toBe(999);
+    expect(draft.capabilities.tools).toBe(true);   // 插件填充缺失键
+    cleanup();
   });
 });

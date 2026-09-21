@@ -197,7 +197,7 @@ describe("retry + 事件订阅", () => {
     expect(calls.hooks.has("retry")).toBe(true);
     const err = { error: { type: "provider.invalid-request", status: 400, message: "x" }, attempt: 2, decision: { retry: false } };
     await calls.hooks.get("retry")!(err);
-    expect(state.logger.info).toHaveBeenCalled();
+    expect(state.logger.warn).toHaveBeenCalled();
   });
 
   it("session.compacted 清 conversationIds", async () => {
@@ -239,5 +239,73 @@ describe("retry + 事件订阅", () => {
     cleanup();
     await new Promise((r) => setTimeout(r, 0));
     expect(aborted).toBe(true);
+  });
+});
+
+describe("fix pass 回归", () => {
+  it("非 JSON 请求的 content-type 不被改写", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x/v2/chat/completions", { method: "POST", headers: { "content-type": "text/plain" }, body: "not json" }) };
+    await triggerHook("http.request", e);
+    expect(e.request.headers.get("content-type")).toBe("text/plain");
+  });
+
+  it("11133 重发时 fetch 失败：回退原 400 不抛", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: chatRequest({ stream: true, messages: [] }) };
+      await triggerHook("http.request", e);
+      vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(e.response.status).toBe(400);
+      expect(JSON.parse(await e.response.text()).code).toBe(11133);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("11133 重发时请求已 abort：不重发、回退原 400", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const ac = new AbortController();
+      const e: any = { sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: new Request("https://copilot.tencent.com/v2/chat/completions", {
+          method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: ac.signal,
+        }) };
+      await triggerHook("http.request", e);
+      ac.abort();
+      const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+      vi.stubGlobal("fetch", fetchSpy);
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(e.response.status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleanup 释放所有 registration dispose", async () => {
+    const { ctx, calls } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    const cleanup = await registerRequests(ctx, state);
+    cleanup();
+    expect(calls.disposals.length).toBeGreaterThan(0);
+    expect(calls.disposals.every((d) => d.mock.calls.length > 0)).toBe(true);
   });
 });
