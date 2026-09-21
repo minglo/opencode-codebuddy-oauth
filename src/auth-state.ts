@@ -1,3 +1,4 @@
+// @legacy V1-only — V1 凭证状态（parseStoredAuth/effectiveAuth/pickAuthMode）；GA 发 3.0.0 时删除（见 spec 附录 A）
 // src/auth-state.ts
 import { REFRESH_SKEW_MS } from "./config.js";
 import type { CodeBuddyConfig } from "./config.js";

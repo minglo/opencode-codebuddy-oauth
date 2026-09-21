@@ -43,6 +43,7 @@ export async function fetchRemoteModels(
     .filter((m): m is RemoteModel => m !== undefined && m.supportsToolCall !== false);
 }
 
+// @legacy（GA 发 3.0.0 时删除）：V2 用 provider.ts 的 remoteModelToInfo
 export function remoteModelToConfig(m: RemoteModel): Record<string,unknown> {
   const entry: Record<string,unknown> = { name: m.name, tool_call: m.supportsToolCall !== false, attachment: !!(m.supportsImages && !m.disabledMultimodal) };
   const ctx = m.maxAllowedSize ?? m.maxInputTokens ?? 0;
@@ -80,6 +81,7 @@ export function remoteModelToConfig(m: RemoteModel): Record<string,unknown> {
   }
   return entry;
 }
+// @legacy（GA 发 3.0.0 时删除）：V2 用 provider.ts 的 remoteModelToInfo
 export function mergeModelEntry(auto: Record<string,unknown>, existing: Record<string,unknown>): Record<string,unknown> {
   const merged: Record<string,unknown> = { ...auto, ...existing };
   if (auto.limit !== undefined && existing.limit !== undefined) merged.limit = { ...(auto.limit as object), ...(existing.limit as object) };

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import * as fs from "fs";
-import { CodeBuddyAuthPlugin } from "../src/index.js";
+import { CodeBuddyAuthPlugin } from "../src/index.v1.js";
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal() as any;
@@ -153,7 +153,7 @@ describe("index event & closure", () => {
     expect(cfg.provider.codebuddy.models.auto).toEqual(expect.objectContaining({ name:"Auto", tool_call:true }));
   });
   it("导出形态：named + default 兼容", async () => {
-    const mod = await import("../src/index.js");
+    const mod = await import("../src/index.v1.js");
     expect((mod as any).CodeBuddyAuthPlugin).toBeDefined();
     expect((mod as any).default).toEqual(expect.objectContaining({ id:"codebuddy-plugin" }));
   });

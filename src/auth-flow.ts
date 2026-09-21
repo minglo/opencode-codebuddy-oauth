@@ -4,6 +4,7 @@ import { AUTH_STATE_TIMEOUT_MS, POLL_INTERVAL_MS, POLL_TIMEOUT_MS, REFRESH_TIMEO
 
 export function sleep(ms:number): Promise<void> { return new Promise(r=>setTimeout(r,ms)); }
 
+// @legacy（GA 发 3.0.0 时删除）：V2 刷新归核心
 export class RefreshLock {
   private inflight = new Map<string, Promise<unknown>>();
   async run<T>(key:string, fn:()=>Promise<T>): Promise<T> {

@@ -2,6 +2,7 @@ import * as os from "os";
 import * as path from "path";
 
 export const PROVIDER_ID = "codebuddy";
+// @legacy（GA 发 3.0.0 时删除）：V1 fetch 路径匹配；V2 由 SDK 拼路径
 export const CHAT_COMPLETIONS_PATH = "/v2/chat/completions";
 export const PLATFORM = "VSCode";
 export const APP_VERSION = "4.9.29177644";
@@ -71,6 +72,7 @@ export function resolveServerUrl(cfg: Pick<CodeBuddyConfig,"endpoint"|"network">
   return { url: "https://www.codebuddy.ai", domain: "www.codebuddy.ai" };
 }
 
+// @legacy（GA 发 3.0.0 时删除）：V1 自读写 auth.json；V2 凭证归 integration
 export function getAuthJsonPath(): string {
   // 与核心 Global.Path.data 对齐：所有平台统一走 xdgData
   // https://github.com/sst/opencode/blob/dev/packages/core/src/global.ts

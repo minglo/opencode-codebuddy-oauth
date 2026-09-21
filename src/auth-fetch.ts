@@ -1,3 +1,4 @@
+// @legacy V1-only — V1 fetch 拦截器（token 注入/401/SSE/11133/11155）；GA 发 3.0.0 时删除（见 spec 附录 A）
 // src/auth-fetch.ts
 import type { AuthState } from "./auth-state.js";
 import { needsRefresh } from "./auth-state.js";
