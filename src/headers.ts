@@ -81,7 +81,7 @@ export function buildAuthHeaders(
   identity: { tenantId: string; enterpriseId: string; userId: string },
 ): Record<string,string> {
   if (auth.type === "api") {
-    // D9: 双头保留，服务端校验头未知，生产双头在用，盲删 401
+    // 双头并发送：服务端实际校验的头未知，生产环境两者在用
     return { Authorization: `Bearer ${auth.key}`, "X-API-Key": auth.key };
   }
   const h: Record<string,string> = { Authorization: `Bearer ${auth.access}` };

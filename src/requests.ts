@@ -44,8 +44,8 @@ export async function registerRequests(ctx: Plugin.Context, state: PluginState):
   };
 }
 
-/** 供测试与非注册路径复用 */
-export function buildHooks(ctx: Plugin.Context, state: PluginState) {
+/** 组装 http.request / http.response 处理器（registerRequests 内部使用） */
+function buildHooks(ctx: Plugin.Context, state: PluginState) {
   return {
     onRequest: (event: HttpRequestEvent) => handleHttpRequest(ctx, event, state),
     onResponse: (event: HttpResponseEvent) => handleHttpResponse(event, state),
@@ -75,7 +75,7 @@ async function handleHttpRequest(ctx: Plugin.Context, event: HttpRequestEvent, s
     cfg: state.cfg, server: state.server, lru: state.conversationIds,
   });
   for (const [k, v] of Object.entries(reqHeaders)) {
-    // Review Focus #2：不改写请求已有的 content-type（FormData boundary 等编码在头里）
+    // 已存在的 content-type 优先（FormData boundary 等编码信息在原始头里）
     if (k.toLowerCase() === "content-type" && headers.has("content-type")) continue;
     headers.set(k, v);
   }
@@ -111,7 +111,7 @@ async function handleHttpRequest(ctx: Plugin.Context, event: HttpRequestEvent, s
 
   const traceId = headers.get("X-Request-Trace-Id");
   if (traceId && !bodyReadFailed) {
-    // body 不可读时不写快照，11133 将走"无快照 → 原样返回"安全路径（M2）
+    // body 不可读时不写快照：11133 重发会走"无快照 → 原样返回"的安全路径
     const snapshot: RequestSnapshot = {
       url: event.request.url,
       method: event.request.method,
@@ -185,7 +185,7 @@ async function handleHttpResponse(event: HttpResponseEvent, state: PluginState):
         event.response = last;
         return;
       }
-      // 非 11133 的 400：clone 读取不破坏原响应，原样返回（M1）
+      // 非 11133 的 400：原样返回
       event.response = response;
       return;
     }

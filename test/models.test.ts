@@ -1,54 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
-import { remoteModelToConfig, mergeModelEntry, fetchRemoteModels, DiscoveryCache, DEFAULT_MODEL } from "../src/models.js";
+import { buildVariants, fetchRemoteModels, DiscoveryCache, DEFAULT_MODEL } from "../src/models.js";
 
-describe("models mapping", () => {
-  it("N1 tool_call:false 落盘", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X", supportsToolCall:false } as any);
-    expect(c.tool_call).toBe(false);
+describe("buildVariants 直通映射", () => {
+  it("原样暴露上游 supportedEfforts（不制造 medium、不折叠 xhigh）", () => {
+    expect(buildVariants(["low", "high"])).toEqual({
+      low: { reasoningEffort: "low" },
+      high: { reasoningEffort: "high" },
+    });
   });
-  it("N1 undefined 视为 true（craft 纳入）", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X" } as any);
-    expect(c.tool_call).toBe(true);
+  it("deepseek-v4-pro low/high/xhigh：三档原样", () => {
+    expect(Object.keys(buildVariants(["low", "high", "xhigh"]))).toEqual(["low", "high", "xhigh"]);
+    expect(buildVariants(["low", "high", "xhigh"]).xhigh).toEqual({ reasoningEffort: "xhigh" });
   });
-  it("N2 手工 reasoning:false 不被翻转且 interleaved 不残留", () => {
-    const auto = { reasoning:true, interleaved:{field:"reasoning_content"}, options:{ reasoningEffort:"high" } };
-    const existing = { reasoning:false };
-    const m = mergeModelEntry(auto as any, existing as any);
-    expect(m.reasoning).toBe(false);
-    expect(m.interleaved).toBeUndefined();
-    expect(m.options).toBeUndefined();
+  it("glm-5.3 low/high/max：max 键值均为原生 max", () => {
+    expect(Object.keys(buildVariants(["low", "high", "max"]))).toEqual(["low", "high", "max"]);
+    expect(buildVariants(["low", "high", "max"]).max).toEqual({ reasoningEffort: "max" });
   });
-  it("limit 皆0 时不落盘", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X" } as any);
-    expect(c.limit).toBeUndefined();
+  it("hy4-preview 仅 high：单档", () => {
+    expect(buildVariants(["high"])).toEqual({ high: { reasoningEffort: "high" } });
   });
-  it("limit 有值时落盘", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X", maxInputTokens:1000, maxOutputTokens:200 } as any);
-    expect(c.limit).toEqual({ context:1000, output:200 });
+  it("glm-5.2 high/xhigh：两档原样（历史曾把 xhigh 折成 max）", () => {
+    expect(Object.keys(buildVariants(["high", "xhigh"]))).toEqual(["high", "xhigh"]);
   });
-  it("supportsReasoning 映射 interleaved/variants", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high"] } } as any);
-    expect(c.reasoning).toBe(true);
-    expect(c.interleaved).toEqual({ field:"reasoning_content" });
-    expect((c.variants as any).low).toEqual({ reasoningEffort:"low" });
-  });
-  it("deepseek 三档 low/high/xhigh：UI 键 low/medium/high/max，max 键值取 max", () => {
-    const c = remoteModelToConfig({ id:"deepseek-v4-flash", name:"Deepseek-V4-Flash", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high","xhigh"] } } as any);
-    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" }, max:{ reasoningEffort:"max" } });
-    expect(Object.keys(c.variants)).toEqual(["low","medium","high","max"]);
-  });
-  it("glm low/high/max：max 键优先原生 max", () => {
-    const c = remoteModelToConfig({ id:"glm-5.3", name:"GLM", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high","max"] } } as any);
-    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" }, max:{ reasoningEffort:"max" } });
-  });
-  it("hy3 两档 low/high：medium 预填 high，无 max 键", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X", supportsReasoning:true, reasoning:{ supportedEfforts:["low","high"] } } as any);
-    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"high" }, high:{ reasoningEffort:"high" } });
-  });
-  it("非 xhigh effort 原样透传", () => {
-    const c = remoteModelToConfig({ id:"x", name:"X", supportsReasoning:true, reasoning:{ supportedEfforts:["max","low"] } } as any);
-    expect(c.variants).toEqual({ low:{ reasoningEffort:"low" }, medium:{ reasoningEffort:"low" }, max:{ reasoningEffort:"max" } });
-    expect(Object.keys(c.variants)).toEqual(["low","medium","max"]);
+  it("空数组：无 variants", () => {
+    expect(buildVariants([])).toEqual({});
   });
 });
 

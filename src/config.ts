@@ -1,14 +1,9 @@
-import * as os from "os";
-import * as path from "path";
-
 export const PROVIDER_ID = "codebuddy";
-// @legacy（GA 发 3.0.0 时删除）：V1 fetch 路径匹配；V2 由 SDK 拼路径
-export const CHAT_COMPLETIONS_PATH = "/v2/chat/completions";
 export const PLATFORM = "VSCode";
-export const APP_VERSION = "4.9.29177644";
+export const APP_VERSION = "4.12.0";
 export const IDE_NAME = "VSCode";
 export const IDE_TYPE = "VSCode";
-export const IDE_VERSION = "1.119.0";
+export const IDE_VERSION = "1.139.0";
 export const DOMAIN_DEFAULT = "www.codebuddy.cn";
 export const PRODUCT = "SaaS";
 export const AGENT_INTENT = "craft";
@@ -19,7 +14,6 @@ export const POLL_TIMEOUT_MS = 8000;
 export const POLL_TOTAL_TIMEOUT_MS = 10*60*1000;
 export const AUTH_STATE_TIMEOUT_MS = 5000;
 export const REFRESH_TIMEOUT_MS = 5000;
-export const REFRESH_SKEW_MS = 5*60*1000;
 export const DEFAULT_EXPIRES_MS = 24*60*60*1000;
 export const DISCOVERY_CACHE_TTL_MS = 5*60*1000;
 
@@ -70,14 +64,4 @@ export function resolveServerUrl(cfg: Pick<CodeBuddyConfig,"endpoint"|"network">
   }
   if (cfg.network === "internal" || cfg.network === "ioa") return { url: "https://copilot.tencent.com", domain: "www.codebuddy.cn" };
   return { url: "https://www.codebuddy.ai", domain: "www.codebuddy.ai" };
-}
-
-// @legacy（GA 发 3.0.0 时删除）：V1 自读写 auth.json；V2 凭证归 integration
-export function getAuthJsonPath(): string {
-  // 与核心 Global.Path.data 对齐：所有平台统一走 xdgData
-  // https://github.com/sst/opencode/blob/dev/packages/core/src/global.ts
-  // https://github.com/sst/opencode/blob/dev/packages/opencode/src/auth/index.ts#L10
-  const home = os.homedir();
-  const xdg = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
-  return path.join(xdg, "opencode", "auth.json");
 }

@@ -19,12 +19,12 @@ export function remoteModelToInfo(m: RemoteModel, providerID: string = PROVIDER_
     capabilities: {
       ...base.capabilities,
       tools: m.supportsToolCall !== false,
-      // base 默认 input 含 "image"（实测 Model.Info.default），不支持时必须移除
+      // base 默认 input 含 "image"，不支持时必须移除
       input: m.supportsImages && !m.disabledMultimodal
         ? Array.from(new Set([...base.capabilities.input, "image"]))
         : base.capabilities.input.filter((x: string) => x !== "image"),
     },
-    // V1 setCacheKey 的 V2 对应（e2e #12 验证等价性）
+    // 等价 V1 setCacheKey
     compatibility: { ...base.compatibility, supportsPromptCacheKey: true },
   };
   const contextLimit = m.maxAllowedSize ?? m.maxInputTokens ?? 0;
@@ -40,7 +40,7 @@ export function remoteModelToInfo(m: RemoteModel, providerID: string = PROVIDER_
     info.compatibility = {
       ...info.compatibility,
       reasoningField: "reasoning_content",
-      requireReasoning: true,   // 等价 V1 11155 body 补空（e2e #15 验证是否可删 http.request 兜底）
+      requireReasoning: true,   // 历史 assistant 消息缺 reasoning_content 时由核心补空（上游 11155 要求）
     };
     const efforts = m.reasoning?.supportedEfforts;
     if (efforts?.length) {
@@ -57,8 +57,8 @@ export function remoteModelToInfo(m: RemoteModel, providerID: string = PROVIDER_
 
 export async function registerProvider(ctx: Plugin.Context, state: PluginState): Promise<() => void> {
   const registrations: Array<{ dispose: () => Promise<void> }> = [];
-  // 先注册 provider transform：真实宿主注册即执行回调（configuredBase 覆写 server），
-  // 之后的 discovery 才用覆写后的 server——对齐 V1 顺序（e2e #9 最终验证）
+  // provider transform 须先注册：真实宿主注册即执行回调（configuredBase 覆写 server），
+  // 之后的 discovery 才会用覆写后的 server
   registrations.push(await ctx.provider.transform((editor) => applyProvider(editor, state)));
   await load(ctx, state);
   await ctx.provider.reload().catch(() => {});   // 用 discovery 结果重建 provider 的 models
@@ -93,13 +93,13 @@ function sameModels(a: RemoteModel[] | null, b: RemoteModel[] | null): boolean {
 async function refresh(ctx: Plugin.Context, state: PluginState): Promise<void> {
   const before = state.discovered;
   await load(ctx, state).catch(() => {});
-  if (!sameModels(before, state.discovered)) await ctx.provider.reload().catch(() => {});   // M7：未变化不重建
+  if (!sameModels(before, state.discovered)) await ctx.provider.reload().catch(() => {});   // 模型未变化时不重建
 }
 
 async function load(ctx: Plugin.Context, state: PluginState): Promise<void> {
   const credential = await resolveCredential(ctx, state);
   if (!credential || credential.type !== "oauth" || !credential.access) {
-    // api 模式/无凭证：不发现，重置为 DEFAULT_MODEL（M3；对齐 V1 与 spec §5.3(4)）
+    // api 模式/无凭证：不发现，重置为 DEFAULT_MODEL
     state.discovered = [DEFAULT_MODEL];
     return;
   }
@@ -155,7 +155,7 @@ function applyModels(editor: ModelEditor, state: PluginState): void {
   for (const m of state.discovered ?? [DEFAULT_MODEL]) {
     editor.update(PROVIDER_ID, m.id, (draft: any) => {
       const info = remoteModelToInfo(m) as any;
-      // 已有（用户）配置优先，仅填充缺失键——对齐 V1 mergeModelEntry 语义（e2e #8）
+      // 已有（用户）配置优先，仅填充缺失键
       for (const [k, v] of Object.entries(info)) {
         if (draft[k] === undefined) draft[k] = v;
       }

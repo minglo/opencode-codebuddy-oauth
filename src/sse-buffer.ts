@@ -9,7 +9,6 @@ function hasFlushTrigger(s: string): boolean {
 }
 
 // 统一输出格式：与阈值/标点触发（payload spread）一致，透传外层真实 payload，不伪造 id/object/created
-// （v1 完整格式含伪造 id:"buffered" + created:Date.now()，定时 flush 路径与 spread 路径格式分裂）
 // 无 payload 上下文时（流尾 flush）回退完整格式兜底
 function flushBuf(
   controller: TransformStreamDefaultController<Uint8Array>,
@@ -33,8 +32,7 @@ export function createSSEBufferedStream(
   const encoder = new TextEncoder();
   const threshold = opts.threshold;
   const maxDelay = opts.maxDelayMs;
-  // 偏离设计 D5 明文"数组收集 join"：改用字符串拼接。V8 cons-string/sliced-string 下 += 与 slice 均摊销 O(1)，
-  // 设计意图（修 leftover O(n²)，见设计文档 5.10/D5）达成且更简，属合理偏离（2026-08-22 审查定案）
+  // 字符串拼接累积（V8 cons-string/sliced-string 下 += 与 slice 均摊销 O(1)）
   let pending = "";
   let reasoningBuf = "";
   let contentBuf = "";

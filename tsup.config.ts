@@ -6,5 +6,5 @@ export default defineConfig({
   target: "node22",
   clean: true,
   sourcemap: true,
-  external: ["@opencode/plugin", "@opencode/plugin/*", "@opencode-ai/plugin", "@opencode-ai/sdk"],
+  external: ["@opencode/plugin", "@opencode/plugin/*"],
 });

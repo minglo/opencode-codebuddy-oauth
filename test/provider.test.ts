@@ -17,19 +17,29 @@ describe("remoteModelToInfo", () => {
     expect(info.compatibility.supportsPromptCacheKey).toBe(true);
   });
 
-  it("reasoning：compatibility + variants 归一（medium→high、max 唯一高档）", () => {
+  it("reasoning：compatibility + variants 直通（不制造 medium、不折叠 xhigh）", () => {
     const info: any = remoteModelToInfo({
       id: "m2", name: "M2", supportsToolCall: true, supportsReasoning: true,
-      reasoning: { supportedEfforts: ["low", "medium", "high", "xhigh", "max"] },
+      reasoning: { supportedEfforts: ["low", "high", "xhigh"] },
     });
     expect(info.compatibility.reasoningField).toBe("reasoning_content");
     expect(info.compatibility.requireReasoning).toBe(true);
     const ids = info.variants.map((v: any) => v.id);
-    expect(ids).toEqual(["low", "medium", "high", "max"]);
+    expect(ids).toEqual(["low", "high", "xhigh"]);
     const byId = Object.fromEntries(info.variants.map((v: any) => [v.id, v.settings.reasoningEffort]));
-    expect(byId.medium).toBe("medium");
+    expect(byId.low).toBe("low");
     expect(byId.high).toBe("high");
-    expect(byId.max).toBe("max");
+    expect(byId.xhigh).toBe("xhigh");
+  });
+
+  it("reasoning：low/high/max 档位原样", () => {
+    const info: any = remoteModelToInfo({
+      id: "m4", name: "M4", supportsToolCall: true, supportsReasoning: true,
+      reasoning: { supportedEfforts: ["low", "high", "max"] },
+    });
+    const ids = info.variants.map((v: any) => v.id);
+    expect(ids).toEqual(["low", "high", "max"]);
+    expect(info.variants.find((v: any) => v.id === "max").settings.reasoningEffort).toBe("max");
   });
 
   it("无 images 时 input 不含 image", () => {
