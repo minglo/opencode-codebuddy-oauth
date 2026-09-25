@@ -1,34 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { RefreshLock, requestAuthState, pollForToken, refreshAccessToken } from "../src/auth-flow.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { requestAuthState, pollForToken, refreshAccessToken } from "../src/auth-flow.js";
 import { fetchJson } from "../src/fetch-json.js";
 
 vi.mock("../src/fetch-json.js", () => ({ fetchJson: vi.fn() }));
-
-describe("RefreshLock 按 providerId 单例", () => {
-  it("同 key 并发去重（单飞）", async () => {
-    const lock = new RefreshLock();
-    let calls=0;
-    const fn=async()=>{ calls++; await new Promise(r=>setTimeout(r,20)); return { accessToken:"a", refreshToken:"r", expiresIn:3600 }; };
-    const [a,b] = await Promise.all([lock.run("codebuddy", fn), lock.run("codebuddy", fn)]);
-    expect(calls).toBe(1);
-    expect(a).toEqual(b);
-  });
-  it("异 key 不互阻", async () => {
-    const lock = new RefreshLock();
-    let calls=0;
-    const fn=async()=>{ calls++; return { accessToken:"a" }; };
-    await Promise.all([lock.run("codebuddy", fn), lock.run("other", fn)]);
-    expect(calls).toBe(2);
-  });
-  it("finally 删键：完成后可再刷新", async () => {
-    const lock = new RefreshLock();
-    let calls=0;
-    const fn=async()=>{ calls++; return { accessToken:"a" }; };
-    await lock.run("codebuddy", fn);
-    await lock.run("codebuddy", fn);
-    expect(calls).toBe(2);
-  });
-});
 
 describe("requestAuthState", () => {
   beforeEach(()=> vi.mocked(fetchJson).mockReset());

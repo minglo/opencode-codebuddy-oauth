@@ -43,51 +43,15 @@ export async function fetchRemoteModels(
     .filter((m): m is RemoteModel => m !== undefined && m.supportsToolCall !== false);
 }
 
-export function remoteModelToConfig(m: RemoteModel): Record<string,unknown> {
-  const entry: Record<string,unknown> = { name: m.name, tool_call: m.supportsToolCall !== false, attachment: !!(m.supportsImages && !m.disabledMultimodal) };
-  const ctx = m.maxAllowedSize ?? m.maxInputTokens ?? 0;
-  const out = m.maxOutputTokens ?? 0;
-  if (ctx || out) entry.limit = { context: ctx, output: out };
-  if (!m.supportsReasoning) return entry;
-  entry.reasoning = true;
-  entry.interleaved = { field: "reasoning_content" };
-  const effort = m.reasoning?.defaultEffort ?? m.reasoning?.effort;
-  if (effort) entry.options = { reasoningEffort: effort };
-  const efforts = m.reasoning?.supportedEfforts;
-  if (efforts?.length) {
-    // variants 键 = UI 档名（opencode 核心按键渲染、并向缺失标准档位补全，故固定补全到 low/medium/high/max）。
-    // 值 = 请求体 reasoning_effort，按 deepseek 官方映射（api-docs.deepseek.com/zh-cn/guides/thinking_mode）归一：
-    //   medium→high, xhigh→high；max 是唯一真正高出 high 的档（CodeBuddy metadata 的 xhigh 是 max 的展示名，非独立档）。
-    const order = ["low", "medium", "high", "max"];
-    const variants: Record<string, { reasoningEffort: string }> = {};
-    const pick = (...cands: string[]) => cands.find(c => efforts.includes(c));
-    for (const e of order) {
-      if (e === "medium") {
-        const hit = pick("medium", "high", "low");
-        if (hit) variants.medium = { reasoningEffort: hit };
-        continue;
-      }
-      if (e === "max") {
-        // 实测（codebuddy 网关，thinking_tokens）：high/xhigh≈1-4k（同档），max≈8.5k（高 3-5 倍）。
-        // metadata 含 xhigh/max 即发 "max"，否则不设此键。
-        if (pick("max") ?? pick("xhigh")) variants.max = { reasoningEffort: "max" };
-        continue;
-      }
-      const hit = pick(e);
-      if (hit) variants[e] = { reasoningEffort: hit };
-    }
-    entry.variants = variants;
-  }
-  return entry;
+// variants 直通映射：UI 档位 = 上游 supportedEfforts 原样暴露。
+// 实测 codebuddy /v3/config 返回 low/high/xhigh/max（无 medium）；历史归一（medium→high、xhigh→max）
+// 会丢失真实档位并制造上游不存在的 medium 档，故不归一。
+export function buildVariants(efforts: string[]): Record<string, { reasoningEffort: string }> {
+  const variants: Record<string, { reasoningEffort: string }> = {};
+  for (const e of efforts) variants[e] = { reasoningEffort: e };
+  return variants;
 }
-export function mergeModelEntry(auto: Record<string,unknown>, existing: Record<string,unknown>): Record<string,unknown> {
-  const merged: Record<string,unknown> = { ...auto, ...existing };
-  if (auto.limit !== undefined && existing.limit !== undefined) merged.limit = { ...(auto.limit as object), ...(existing.limit as object) };
-  if (auto.options !== undefined && existing.options !== undefined) merged.options = { ...(auto.options as object), ...(existing.options as object) };
-  if (auto.variants !== undefined && existing.variants !== undefined) merged.variants = { ...(auto.variants as object), ...(existing.variants as object) };
-  if (existing.reasoning === false) { delete (merged as any).interleaved; delete (merged as any).options; }
-  return merged;
-}
+
 export class DiscoveryCache {
   private data: RemoteModel[] | null = null;
   private fetchedAt = 0;

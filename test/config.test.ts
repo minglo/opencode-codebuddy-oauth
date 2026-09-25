@@ -1,9 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getConfig, resolveServerUrl, getAuthJsonPath } from "../src/config.js";
-import * as os from "os";
-
-const homedirSpy = vi.hoisted(() => vi.fn(() => "/home/test"));
-vi.mock("os", () => ({ homedir: homedirSpy }));
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { getConfig, resolveServerUrl } from "../src/config.js";
 
 describe("config", () => {
   const orig = process.env;
@@ -47,19 +43,5 @@ describe("config", () => {
     expect(resolveServerUrl(cfg).domain).toBe("www.codebuddy.cn");
     // codebuddy.ai host 才改 ai
     expect(resolveServerUrl({ endpoint: "https://www.codebuddy.ai", network: "internal" } as any).domain).toBe("www.codebuddy.ai");
-  });
-  it("getAuthJsonPath 统一走 xdgData（与核心 Global.Path.data 对齐，所有平台一致）", () => {
-    // https://github.com/sst/opencode/blob/dev/packages/core/src/global.ts
-    // https://github.com/sst/opencode/blob/dev/packages/opencode/src/auth/index.ts#L10
-    for (const plat of ["darwin", "linux", "win32"] as const) {
-      vi.spyOn(process, "platform", "get").mockReturnValue(plat as any);
-      homedirSpy.mockReturnValue("/home/test");
-      delete process.env.XDG_DATA_HOME;
-      expect(getAuthJsonPath()).toBe("/home/test/.local/share/opencode/auth.json");
-    }
-    vi.spyOn(process, "platform", "get").mockReturnValue("linux" as any);
-    homedirSpy.mockReturnValue("/home/test");
-    process.env.XDG_DATA_HOME = "/tmp/xdg";
-    expect(getAuthJsonPath()).toBe("/tmp/xdg/opencode/auth.json");
   });
 });

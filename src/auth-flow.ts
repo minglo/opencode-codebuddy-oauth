@@ -1,19 +1,8 @@
 // src/auth-flow.ts
 import { fetchJson } from "./fetch-json.js";
-import { AUTH_STATE_TIMEOUT_MS, POLL_INTERVAL_MS, POLL_TIMEOUT_MS, REFRESH_TIMEOUT_MS, PLATFORM, PROVIDER_ID } from "./config.js";
+import { AUTH_STATE_TIMEOUT_MS, POLL_INTERVAL_MS, POLL_TIMEOUT_MS, REFRESH_TIMEOUT_MS, PLATFORM } from "./config.js";
 
 export function sleep(ms:number): Promise<void> { return new Promise(r=>setTimeout(r,ms)); }
-
-export class RefreshLock {
-  private inflight = new Map<string, Promise<unknown>>();
-  async run<T>(key:string, fn:()=>Promise<T>): Promise<T> {
-    const hit = this.inflight.get(key) as Promise<T> | undefined;
-    if (hit) return hit;
-    const p = fn().finally(()=> this.inflight.delete(key));
-    this.inflight.set(key, p as Promise<unknown>);
-    return p;
-  }
-}
 
 export async function requestAuthState(serverUrl:string): Promise<{ state:string; url:string }> {
   const url = `${serverUrl}/v2/plugin/auth/state?platform=${PLATFORM}&ioa=1`;

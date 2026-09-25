@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { baseHeaders, buildRequestHeaders, buildAuthHeaders, resolveModel } from "../src/headers.js";
 import { LRUMap } from "../src/lru.js";
+import { APP_VERSION, IDE_NAME, IDE_TYPE, IDE_VERSION, PLATFORM, PRODUCT, AGENT_INTENT, ENV_ID } from "../src/config.js";
 
 function makeDeps(overrides: Record<string, unknown> = {}) {
   const cfg: any = {
-    platform: "VSCode", appVersion: "4.9.29177644", ideName: "VSCode", ideType: "VSCode",
-    ideVersion: "1.119.0", product: "SaaS", agentIntent: "craft", envId: "production",
+    platform: PLATFORM, appVersion: APP_VERSION, ideName: IDE_NAME, ideType: IDE_TYPE,
+    ideVersion: IDE_VERSION, product: PRODUCT, agentIntent: AGENT_INTENT, envId: ENV_ID,
     model: "", stableConversationId: true, conversationMapMax: 100, ...overrides,
   };
   const server = { url: "https://copilot.tencent.com", domain: "www.codebuddy.cn" };
