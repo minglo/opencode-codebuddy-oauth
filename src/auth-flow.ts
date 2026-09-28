@@ -38,7 +38,10 @@ export async function pollForToken(serverUrl:string, state:string, expiresAt:num
 export async function refreshAccessToken(refreshToken:string, serverUrl:string): Promise<{accessToken:string; refreshToken?:string; expiresIn?:number}|null> {
   const res = await fetchJson<{code:number; data?:{accessToken:string; refreshToken?:string; expiresIn?:number}}>(
     `${serverUrl}/v2/plugin/auth/token/refresh`,
-    { method:"POST", headers:{ "Content-Type":"application/json", Accept:"application/json", Authorization:`Bearer ${refreshToken}` }, timeoutMs: REFRESH_TIMEOUT_MS },
+    // refreshToken 必须放在 X-Refresh-Token 头里：上游只认这个（官方 CLI 也是这么发的）。
+    // 用 `Authorization: Bearer <refreshToken>` 会被回 `400 code 10001 refreshToken is empty`。
+    // X-Auth-Refresh-Source 与官方 CLI 保持一致。
+    { method:"POST", headers:{ "Content-Type":"application/json", Accept:"application/json", "X-Refresh-Token":refreshToken, "X-Auth-Refresh-Source":"plugin" }, timeoutMs: REFRESH_TIMEOUT_MS },
   );
   if (!res.ok || res.data.code !== 0) return null;
   return res.data.data ?? null;

@@ -68,10 +68,17 @@ describe("pollForToken 先查后睡", () => {
 
 describe("refreshAccessToken", () => {
   beforeEach(()=> vi.mocked(fetchJson).mockReset());
-  it("带 Authorization: Bearer refreshToken 头", async () => {
+  it("带 X-Refresh-Token 头（不是 Authorization）", async () => {
     vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:0, data:{ accessToken:"new" } } } as any);
     await refreshAccessToken("my-refresh", "https://x");
     const headers = vi.mocked(fetchJson).mock.calls[0][1]?.headers as Record<string,string>;
-    expect(headers["Authorization"]).toBe("Bearer my-refresh");
+    expect(headers["X-Refresh-Token"]).toBe("my-refresh");
+    // 回归：Authorization 带 refreshToken 会被上游回 400 code 10001 refreshToken is empty
+    expect(headers["Authorization"]).toBeUndefined();
+  });
+  it("透传轮换后的 refreshToken", async () => {
+    vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:0, data:{ accessToken:"new", refreshToken:"rotated", expiresIn:3600 } } } as any);
+    const res = await refreshAccessToken("old", "https://x");
+    expect(res?.refreshToken).toBe("rotated");
   });
 });
