@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { remoteModelToInfo } from "../src/provider.js";
+import { remoteModelToInfo, modelFingerprint } from "../src/provider.js";
 
 describe("remoteModelToInfo", () => {
   it("基础能力与 limit 映射", () => {
@@ -51,7 +51,7 @@ describe("remoteModelToInfo", () => {
 import { vi, afterEach } from "vitest";
 import { registerProvider } from "../src/provider.js";
 import { createMockCtx, jsonResponse, makeProviderEditor, makeModelEditor, makeTestState } from "./helpers/mock-ctx.js";
-import { DiscoveryCache, DEFAULT_MODEL } from "../src/models.js";
+import { DiscoveryCache, DEFAULT_MODEL, DiscoveryTransientError } from "../src/models.js";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -154,7 +154,7 @@ describe("registerProvider", () => {
     ])));
     const { ctx, applyProviderTransforms, applyModelTransforms } = createMockCtx({ credential: { type: "oauth", access: "tok", refresh: "r", expires: Date.now() + 3600_000 } });
     const state = makeTestState({
-      discoveryCache: new DiscoveryCache({ ttlMs: 60_000, fetchFn: (token) => (globalThis.fetch as any)(`https://copilot.tencent.com/v3/config?t=${token}`).then((r: Response) => r.json()).then((b: any) => b.data.models) }),
+      discoveryCache: new DiscoveryCache({ ttlMs: 60_000, fetchFn: (token) => (globalThis.fetch as any)(`https://copilot.tencent.com/v3/config?t=${token}`).then((r: Response) => r.json()).then((b: any) => ({ ok: true, models: b.data.models })) }),
     });
     const cleanup = await registerProvider(ctx, state);
     const p = makeProviderEditor();
@@ -168,6 +168,7 @@ describe("registerProvider", () => {
   it("credential.switched 事件触发 provider.reload", async () => {
     let pushEvent: ((e: any) => void) | null = null;
     const { ctx, calls } = createMockCtx({
+      credential: { type: "oauth", access: "tok" },
       subscription: () => (async function* () {
         while (true) {
           const next = await new Promise<any>((resolve) => { pushEvent = resolve; });
@@ -177,11 +178,16 @@ describe("registerProvider", () => {
     });
     const state = makeTestState();
     state.discovered = [DEFAULT_MODEL];
+    let seq = 0;
+    // 每次发现都返回不同模型，确保事件路径的 refresh 会真的触发 reload
+    (state.discoveryCache.get as any).mockImplementation(async () => [{ id: `m${++seq}`, name: `M${seq}` }]);
     const cleanup = await registerProvider(ctx, state);
+    const before = calls.reloads.provider;
     pushEvent!({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: "c1" } });
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
-    expect(calls.reloads.provider).toBeGreaterThan(0);
+    // 事件路径必须确实走到 refresh → reload；注册时的那次 reload 不算
+    expect(calls.reloads.provider).toBe(before + 1);
     cleanup();
   });
 
@@ -261,5 +267,225 @@ describe("registerProvider", () => {
     expect(added).toHaveLength(1);
     expect(added[0].models.some((m: any) => m.id === "auto")).toBe(true);
     cleanup();
+  });
+
+  it("首次发现 401：回落 DEFAULT_MODEL 而非空目录", async () => {
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({
+      discoveryCache: { get: vi.fn(async () => { throw Object.assign(new Error("401"), { status: 401 }); }) } as any,
+    });
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toEqual([DEFAULT_MODEL]);
+    cleanup();
+  });
+
+  it("发现暂时失败且无旧目录：回落 DEFAULT_MODEL", async () => {
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({
+      discoveryCache: { get: vi.fn(async () => { throw new DiscoveryTransientError(); }) } as any,
+    });
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toEqual([DEFAULT_MODEL]);
+    cleanup();
+  });
+
+  it("切号时使切换到的账号的陈旧缓存失效", async () => {
+    let push!: (e: any) => void;
+    const invalidate = vi.fn();
+    const get = vi.fn(async () => [DEFAULT_MODEL]);
+    const { ctx } = createMockCtx({
+      credential: { type: "oauth", access: "tok" },
+      subscription: () => (async function* () { while (true) yield await new Promise<any>(r => { push = r; }); })(),
+    });
+    const state = makeTestState({ discoveryCache: { get, invalidate } as any });
+    const cleanup = await registerProvider(ctx, state);
+    push({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: "c2" } });
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(invalidate).toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith("credential:c2");
+    // 必须在 refresh（即本轮 get）之前失效，否则新一轮请求会先污染缓存
+    expect(invalidate.mock.invocationCallOrder[0]).toBeLessThan(get.mock.invocationCallOrder.at(-1)!);
+    cleanup();
+  });
+
+  it("credentialID 缺失：不失效任何账号缓存", async () => {
+    let push!: (e: any) => void;
+    const invalidate = vi.fn();
+    const { ctx } = createMockCtx({
+      credential: { type: "oauth", access: "tok" },
+      subscription: () => (async function* () { while (true) yield await new Promise<any>(r => { push = r; }); })(),
+    });
+    const state = makeTestState({ discoveryCache: { get: vi.fn(async () => [DEFAULT_MODEL]), invalidate } as any });
+    const cleanup = await registerProvider(ctx, state);
+    const before = state.discoveryCache.get.mock.calls.length;
+    push({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: null } });
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(invalidate).not.toHaveBeenCalled();
+    // credentialID 缺失只跳过失效，不得连 refresh 一起跳过。
+    expect(state.discoveryCache.get.mock.calls.length).toBeGreaterThan(before);
+    cleanup();
+  });
+
+  it("401 且已有旧目录：保留上一份目录", async () => {
+    const keep = [{ id: "keep", name: "Keep" }];
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({
+      discoveryCache: { get: vi.fn(async () => { throw Object.assign(new Error("401"), { status: 401 }); }) } as any,
+    });
+    state.discovered = keep;
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toBe(keep);
+    cleanup();
+  });
+
+  it("切号后新账号首次发现失败：回落 auto，不继承旧账号目录", async () => {
+    let push!: (e: any) => void;
+    const get = vi.fn()
+      .mockResolvedValueOnce([{ id: "a-model", name: "A" }])
+      .mockRejectedValue(Object.assign(new Error("401"), { status: 401 }));
+    const { ctx } = createMockCtx({
+      credential: { type: "oauth", access: "tok" },
+      subscription: () => (async function* () { while (true) yield await new Promise<any>(r => { push = r; }); })(),
+    });
+    const state = makeTestState({ discoveryCache: { get, invalidate: vi.fn() } as any });
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toEqual([{ id: "a-model", name: "A" }]);
+
+    push({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: "c2" } });
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    // 切号必须先清空上一账号目录：新账号 401 时回落到 auto。
+    expect(state.discovered).toEqual([DEFAULT_MODEL]);
+    cleanup();
+  });
+
+  it("旧账号在途发现晚返回：不覆盖切换后账号的目录", async () => {
+    // 只接管 setInterval：TTL 刷新可被推进，事件循环的 setTimeout 仍走真实时钟。
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let push!: (e: any) => void;
+    let resolveStale!: (v: any) => void;
+    const stale = new Promise<any>((r) => { resolveStale = r; });
+    const get = vi.fn()
+      .mockResolvedValueOnce([{ id: "a-model", name: "A" }])
+      .mockImplementationOnce(() => stale)
+      .mockResolvedValue([{ id: "b-model", name: "B" }]);
+    const { ctx } = createMockCtx({
+      credential: { type: "oauth", access: "tok" },
+      subscription: () => (async function* () { while (true) yield await new Promise<any>(r => { push = r; }); })(),
+    });
+    const state = makeTestState({ discoveryCache: { get, invalidate: vi.fn() } as any });
+    const cleanup = await registerProvider(ctx, state);
+    expect(state.discovered).toEqual([{ id: "a-model", name: "A" }]);
+
+    // TTL 刷新发起旧账号的发现请求并挂起（独立于事件循环的在途请求）。
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+    expect(get).toHaveBeenCalledTimes(2);
+
+    // 切号：新账号立即发现成功，事件路径不等待旧请求。
+    push({ type: "credential.switched", data: { integrationID: "codebuddy", credentialID: "c2" } });
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(state.discovered).toEqual([{ id: "b-model", name: "B" }]);
+
+    // 旧请求晚到：代次已变，必须整体丢弃。
+    resolveStale([{ id: "a-model", name: "A" }]);
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(state.discovered).toEqual([{ id: "b-model", name: "B" }]);
+    cleanup();
+  });
+
+  it("发现缓存键：credential 连接用 credential:<id>", async () => {
+    const get = vi.fn(async () => [DEFAULT_MODEL]);
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    (ctx.integration.connection.active as any).mockResolvedValue({ type: "credential", id: "c1", label: "x" });
+    const state = makeTestState({ discoveryCache: { get, invalidate: vi.fn() } as any });
+    const cleanup = await registerProvider(ctx, state);
+    expect(get.mock.calls[0][0]).toBe("credential:c1");
+    cleanup();
+  });
+
+  it("发现缓存键：env 连接用 env:<name>", async () => {
+    const get = vi.fn(async () => [DEFAULT_MODEL]);
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    (ctx.integration.connection.active as any).mockResolvedValue({ type: "env", name: "CODEBUDDY_API_KEY" });
+    const state = makeTestState({ discoveryCache: { get, invalidate: vi.fn() } as any });
+    const cleanup = await registerProvider(ctx, state);
+    expect(get.mock.calls[0][0]).toBe("env:CODEBUDDY_API_KEY");
+    cleanup();
+  });
+
+  it("发现缓存键：无连接身份时用 token 指纹，且不含原始 token", async () => {
+    const token = "raw-secret-token-text";
+    const get = vi.fn(async () => [DEFAULT_MODEL]);
+    const { ctx } = createMockCtx({ credential: { type: "oauth", access: token } });
+    (ctx.integration.connection.active as any).mockResolvedValue({ type: "unknown" });
+    const state = makeTestState({ discoveryCache: { get, invalidate: vi.fn() } as any });
+    const cleanup = await registerProvider(ctx, state);
+    const key = get.mock.calls[0][0] as string;
+    expect(key.startsWith("credential:")).toBe(true);
+    expect(key).not.toContain(token);
+    cleanup();
+  });
+});
+
+describe("modelFingerprint", () => {
+  it("同 ID 但 limit 变化 → 触发 reload", async () => {
+    vi.useFakeTimers();
+    const get = vi.fn()
+      .mockResolvedValueOnce([{ id: "same", name: "M", maxInputTokens: 1000 }])
+      .mockResolvedValue([{ id: "same", name: "M", maxInputTokens: 2000 }]);
+    const { ctx, calls } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({ discoveryCache: { get } as any });
+    const cleanup = await registerProvider(ctx, state);
+    const before = calls.reloads.provider;
+    await vi.advanceTimersByTimeAsync(300001);
+    expect(state.discovered?.[0].maxInputTokens).toBe(2000);
+    expect(calls.reloads.provider).toBe(before + 1);
+    cleanup(); vi.useRealTimers();
+  });
+
+  it("同 ID 但 supportedEfforts 变化 → 触发 reload", async () => {
+    vi.useFakeTimers();
+    const get = vi.fn()
+      .mockResolvedValueOnce([{ id: "same", name: "M", supportsReasoning: true, reasoning: { supportedEfforts: ["low", "high"] } }])
+      .mockResolvedValue([{ id: "same", name: "M", supportsReasoning: true, reasoning: { supportedEfforts: ["low", "high", "max"] } }]);
+    const { ctx, calls } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({ discoveryCache: { get } as any });
+    const cleanup = await registerProvider(ctx, state);
+    const before = calls.reloads.provider;
+    await vi.advanceTimersByTimeAsync(300001);
+    expect(calls.reloads.provider).toBe(before + 1);
+    cleanup(); vi.useRealTimers();
+  });
+
+  it("完全无变化 → 不 reload", () => {
+    const a = [{ id: "x", name: "X", maxInputTokens: 1, reasoning: { supportedEfforts: ["low"] } }];
+    const b = [{ id: "x", name: "X", maxInputTokens: 1, reasoning: { supportedEfforts: ["low"] } }];
+    expect(modelFingerprint(a as any)).toBe(modelFingerprint(b as any));
+  });
+
+  it("结构相同但引用不同 → refresh 端到端不 reload", async () => {
+    vi.useFakeTimers();
+    const make = () => [{ id: "same", name: "M", maxInputTokens: 1000, reasoning: { supportedEfforts: ["low"] } }];
+    const get = vi.fn(async () => make());
+    const { ctx, calls } = createMockCtx({ credential: { type: "oauth", access: "tok" } });
+    const state = makeTestState({ discoveryCache: { get } as any });
+    const cleanup = await registerProvider(ctx, state);
+    const before = calls.reloads.provider;
+    const firstRef = state.discovered;
+    await vi.advanceTimersByTimeAsync(300001);
+    expect(state.discovered).not.toBe(firstRef);   // 确实重新发现过（新引用）
+    expect(calls.reloads.provider).toBe(before);    // 但指纹相同 → 不 reload
+    cleanup(); vi.useRealTimers();
+  });
+
+  it("缺失字段与显式 undefined 指纹相同；null 输入为空串", () => {
+    expect(modelFingerprint([{ id: "x", name: "X" }] as any))
+      .toBe(modelFingerprint([{ id: "x", name: "X", maxInputTokens: undefined, reasoning: undefined }] as any));
+    expect(modelFingerprint(null)).toBe("");
   });
 });

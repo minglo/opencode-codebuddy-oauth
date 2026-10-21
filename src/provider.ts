@@ -4,7 +4,8 @@ import type { Plugin } from "@opencode/plugin";
 import type { ProviderEditor } from "@opencode/plugin/promise/provider";
 import type { ModelEditor } from "@opencode/plugin/promise/model";
 import { DISCOVERY_CACHE_TTL_MS, PROVIDER_ID, domainForHost } from "./config.js";
-import { resolveCredential } from "./credentials.js";
+import { resolveConnectionIdentity } from "./credentials.js";
+import { accountKeyOf } from "./key.js";
 import { DEFAULT_MODEL, buildVariants, type RemoteModel } from "./models.js";
 import type { PluginState } from "./state.js";
 
@@ -71,6 +72,15 @@ export async function registerProvider(ctx: Plugin.Context, state: PluginState):
         const e = event as any;
         if (e?.type !== "credential.switched" && e?.type !== "credential.updated") continue;
         if (e.type === "credential.switched" && e.data?.integrationID !== PROVIDER_ID) continue;
+        // 凭证事件先推进代次：任何尚未返回的旧发现结果都必须在 load() 中被丢弃。
+        state.epoch += 1;
+        if (e.type === "credential.switched") {
+          // 切换到的账号的陈旧缓存必须在 refresh 之前失效；没有 credentialID 就不猜
+          const switchedKey = accountKeyOf({ type: "credential", id: e.data?.credentialID });
+          if (switchedKey) state.discoveryCache.invalidate(switchedKey);
+          // 清空上一账号目录：新账号首次发现失败时回落 auto，而不是继承旧目录。
+          state.discovered = null;
+        }
         await refresh(ctx, state);
       }
     } catch { /* abort 或流结束 */ }
@@ -84,35 +94,63 @@ export async function registerProvider(ctx: Plugin.Context, state: PluginState):
   };
 }
 
-function sameModels(a: RemoteModel[] | null, b: RemoteModel[] | null): boolean {
-  if (a === b) return true;
-  if (!a || !b || a.length !== b.length) return false;
-  return a.every((m, i) => m.id === b[i]?.id);
+/**
+ * 模型定义指纹：覆盖会改变 provider 行为的全部元数据，字段顺序固定。
+ * 仅 id 相同但 limit/能力/档位变化时也必须重建 provider 的 models。
+ * supportedEfforts 按原序比较（顺序即 UI 档位顺序）。
+ */
+export function modelFingerprint(models: RemoteModel[] | null): string {
+  if (!models) return "";
+  return JSON.stringify(models.map((m) => [
+    m.id,
+    m.name,
+    m.maxInputTokens,
+    m.maxOutputTokens,
+    m.maxAllowedSize,
+    m.supportsToolCall,
+    m.supportsImages,
+    m.supportsReasoning,
+    m.disabledMultimodal,
+    m.reasoning?.effort,
+    m.reasoning?.defaultEffort,
+    m.reasoning?.supportedEfforts,
+  ]));
 }
 
 async function refresh(ctx: Plugin.Context, state: PluginState): Promise<void> {
   const before = state.discovered;
   await load(ctx, state).catch(() => {});
-  if (!sameModels(before, state.discovered)) await ctx.provider.reload().catch(() => {});   // 模型未变化时不重建
+  if (modelFingerprint(before) !== modelFingerprint(state.discovered)) await ctx.provider.reload().catch(() => {});   // 模型未变化时不重建
 }
 
 async function load(ctx: Plugin.Context, state: PluginState): Promise<void> {
-  const credential = await resolveCredential(ctx, state);
-  if (!credential || credential.type !== "oauth" || !credential.access) {
+  // 捕获代次：本次发现若跨过了一次凭证事件，其结果属于旧账号，必须整体丢弃。
+  const epoch = state.epoch;
+  const resolved = await resolveConnectionIdentity(ctx, state);
+  if (state.epoch !== epoch) return;
+  if (!resolved) {
     // api 模式/无凭证：不发现，重置为 DEFAULT_MODEL
     state.discovered = [DEFAULT_MODEL];
     return;
   }
+  if (resolved.credential.type !== "oauth" || !resolved.credential.access) {
+    state.discovered = [DEFAULT_MODEL];
+    return;
+  }
   try {
-    state.discovered = await state.discoveryCache.get(credential.access, { signal: undefined });
+    const models = await state.discoveryCache.get(resolved.accountKey, resolved.credential.access, { signal: undefined });
+    // 成功结果同样要验代次：A 的在途请求晚于切到 B 返回时，不得覆盖 B 的目录。
+    if (state.epoch !== epoch) return;
+    state.discovered = models;
   } catch (e: any) {
+    if (state.epoch !== epoch) return;
     if (e?.status === 401 || e?.status === 403) {
       state.logger.warn("discovery 401/403 — 需重新登录（/connect codebuddy）");
-      state.discovered = state.discovered ?? [];
     } else {
       state.logger.warn(`discovery failed: ${e?.message}`);
-      state.discovered = state.discovered ?? [DEFAULT_MODEL];
     }
+    // 失败绝不产生空目录：保留上一份真实目录，没有就回落 DEFAULT_MODEL
+    state.discovered = state.discovered?.length ? state.discovered : [DEFAULT_MODEL];
   }
 }
 

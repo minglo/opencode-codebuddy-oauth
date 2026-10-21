@@ -32,8 +32,9 @@ export function makeTestState(overrides: Partial<PluginState> = {}): PluginState
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     server: resolveServerUrl(cfg),
     conversationIds: new LRUMap<string, string>(1000),
-    discoveryCache: { get: vi.fn(async () => []) } as any,
+    discoveryCache: { get: vi.fn(async () => []), invalidate: vi.fn() } as any,
     discovered: null,
+    epoch: 0,
     requestSnapshots: new LRUMap(32),
     ...overrides,
   };

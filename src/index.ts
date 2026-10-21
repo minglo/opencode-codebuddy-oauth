@@ -27,6 +27,7 @@ export default Plugin.define({
       conversationIds: new LRUMap<string, string>(cfg.conversationMapMax),
       discoveryCache,
       discovered: null,
+      epoch: 0,
       requestSnapshots: new LRUMap<string, RequestSnapshot>(32),
     };
 

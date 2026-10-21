@@ -17,6 +17,7 @@
 
 > **版本要求**：`3.x` 仅支持 **OpenCode V2**（插件 API `@opencode/plugin`，对应 opencode `2.0.4+`）。
 > OpenCode V1 用户请使用 **`2.2.0`**（V1 线最终版本，`npm install opencode-codebuddy-oauth@2`）；`2.x` 不再新增功能，仅作兼容保留。
+> `3.1.0` 起修复模型缓存隔离、发现失败回退、元数据变更刷新、11133 重试超时与请求快照释放。
 
 ### 方式 1 — npm 包（推荐）
 
@@ -57,9 +58,9 @@ OAuth 流程可以完全在 TUI 内完成：
 
 - **OAuth 登录** — 直接在编辑器内走 IOA 流程：`/v2/plugin/auth/state` → 浏览器 → 轮询拿 token。
 - **API Key 登录** — 在 `/connect codebuddy` 处粘贴 `ck_xxx` Key；无需浏览器、不轮询、不刷新。
-- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（5 秒超时），提取 craft agent 的模型列表并注册为 provider 模型（5 分钟 TTL 缓存 + 并发单飞去重，401/403 不重新登录前不缓存）；API Key 模式下模型回退内置 `auto`。
+- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（5 秒超时），提取 craft agent 的模型列表并注册为 provider 模型（5 分钟 TTL 缓存 + 并发单飞去重；缓存与并发单飞按连接身份 `credential:<id>` / `env:<name>` 隔离，token 轮换不触发重新发现，切换账号会先失效切换到的账号的陈旧缓存）；API Key 模式下模型回退内置 `auto`。
 - **401/403 自动刷新 token** — 凭证由 OpenCode 核心 `integration` 管理；插件注册 `refresh` 回调调 `/v2/plugin/auth/token/refresh` 拿新 token，核心负责刷新调度、并发去重与重试（`src/integration.ts`）。
-- **瞬时 400（code 11133）自动重试** — CodeBuddy 网关偶发把上游厂商的瞬时校验失败包装成 HTTP 400 `{"code":11133,"msg":"Invalid request parameters"}` 返回（实测为服务端侧故障窗口，同构请求稍后重发即成功）。`http.response` hook 识别到该错误时按 **1s → 4s → 10s → 25s** 退避幂等重发（最多 4 次额外尝试，总等待 ≤40s），把偶发故障对对话的影响从「回合中断」降级为「无感重试」；其他 400（如 11101 参数解析错误）不受影响、原样透传。
+- **瞬时 400（code 11133）自动重试** — CodeBuddy 网关偶发把上游厂商的瞬时校验失败包装成 HTTP 400 `{"code":11133,"msg":"Invalid request parameters"}` 返回（实测为服务端侧故障窗口，同构请求稍后重发即成功）。`http.response` hook 识别到该错误时按 **1s → 4s → 10s → 25s** 退避幂等重发（最多 4 次额外尝试，总等待 ≤40s，重试总预算上限 45s），把偶发故障对对话的影响从「回合中断」降级为「无感重试」；重试阶段的超时只约束重试过程，与成功响应体的流式读取分离，恢复成功的长回答不会被重试预算截断；其他 400（如 11101 参数解析错误）不受影响、原样透传。
 - **模型兼容** — `compatibility.requireReasoning` 让核心为历史 `assistant` 消息补 `reasoning_content`（code 11155 兜底：带 `tools` 请求要求回传该字段，上游可跳过推理导致 400）；`variants` **直通上游 `supportedEfforts`**（实测组合为 `low/high/xhigh/max`，UI 档位与上游档位一一对应，不再归一）。
 - **SSE 缓冲** — 流式响应按阈值/换行/标点/最大延迟合并分块输出，降低 UI 渲染频率；`reasoning_content` 与 `content` 混排保留。
 - **session 级 `X-Conversation-ID` 稳定化** — 同一个 OpenCode session 内所有请求复用同一 UUID，跨 turn、跨 tool call 一致，提升上游 prompt cache 命中率（`session.compacted` / `session.deleted` 时清掉 LRU 条目）。
@@ -74,9 +75,9 @@ OAuth 流程可以完全在 TUI 内完成：
 | 注册点 | 作用 |
 | ---- | ---- |
 | `ctx.integration.transform` | 注册 3 种登录方式：IOA OAuth（`authorize` + `refresh`）、API Key、环境变量 `CODEBUDDY_API_KEY`。 |
-| `ctx.provider.transform` / `ctx.model.transform` | 注入 `codebuddy` provider（如缺失）与模型定义；OAuth 模式下用 `/v3/config` 发现结果填充，凭证事件与 TTL 定时器触发 `provider.reload()`。 |
+| `ctx.provider.transform` / `ctx.model.transform` | 注入 `codebuddy` provider（如缺失）与模型定义；OAuth 模式下用 `/v3/config` 发现结果填充，凭证事件与 TTL 定时器触发重新发现；仅当模型元数据指纹变化时才 `provider.reload()`。 |
 | `ctx.session.hook("http.request")` | 注入认证头（`Authorization` / `X-Tenant-Id` / `X-User-Id` 等）与非认证头（`X-Conversation-ID`、B3、`X-Model-ID` 等 22 项），处理 body（`stream_options`、`reasoning_content` 兜底），缓存请求快照。 |
-| `ctx.session.hook("http.response")` | SSE 缓冲；400 + `code 11133` 时用快照退避重发。 |
+| `ctx.session.hook("http.response")` | SSE 缓冲；400 + `code 11133` 时用快照退避重发；请求快照在响应结束时释放。 |
 | `ctx.session.hook("retry")` | 观测日志（决策归核心）。 |
 | `ctx.event.subscribe` | 监听 `session.compacted` / `session.deleted` 淘汰 conversationId；监听 `credential.switched` / `credential.updated` 触发模型刷新。 |
 
@@ -194,10 +195,10 @@ OAuth 模式下，插件加载时会调用 `GET ${serverUrl}/v3/config`（5 秒�
 
 ### 缓存与降级
 
-- 结果缓存 **5 分钟 TTL**（`DISCOVERY_CACHE_TTL_MS`），且**并发单飞**——同一时刻多个请求共享同一次抓取。
-- **401/403 不缓存**：原样抛出并提示重新登录（token 可能已过期）。
-- 发现失败（网络/5xx）或返回空时，回退内置 **`auto`** 模型（168k context / 32k output / `tool_call`）。
-- 凭证切换（`credential.switched` / `credential.updated`）与 TTL 到期触发重新发现，仅当模型列表变化时才 `provider.reload()`。
+- 结果缓存 **5 分钟 TTL**（`DISCOVERY_CACHE_TTL_MS`），且**并发单飞**——同一时刻同一连接身份（`credential:<id>` / `env:<name>`）的多个请求共享同一次抓取。
+- **暂时性失败保留同账号上一份有效目录**；无有效目录时回退内置 **`auto`**。返回空目录（含全部模型都不支持 tool call）同样回退 **`auto`**，不缓存为空。
+- **首次发现即 401/403**（token 过期）时同样回退 **`auto`**，并提示重新登录（`/connect codebuddy`）。
+- 凭证切换（`credential.switched` / `credential.updated`）与 TTL 到期触发重新发现；切换账号会先失效切换到的账号的陈旧缓存（宿主把 `data.credentialID` 视为传入连接）。仅当模型元数据（id/limit/能力/档位等）变化时才 `provider.reload()`。
 
 **API Key 模式不执行发现**，模型回退内置 `auto`。
 
@@ -243,6 +244,7 @@ OpenCode 每个 turn 都会把完整 message history 重发到 `/chat/completion
 - 凭证由 **OpenCode 核心**管理（`~/.local/share/opencode/auth.json` 的 `codebuddy` 键，Linux；`%APPDATA%\opencode\auth.json` Windows；`~/Library/Application Support/opencode/auth.json` macOS）。插件不再直接读写该文件。
 - OAuth 模式：集成注册 `refresh` 回调，核心在 token 即将过期或收到 401/403 时自动调用并写回新凭证；刷新调度、并发去重均由核心负责。
 - API Key 模式：key 由核心凭证系统存储，**不刷新**（需要在 CodeBuddy 官网手动重新生成）。环境变量 `CODEBUDDY_API_KEY` 作为集成注册的 `env` 方法，无需存储即可使用。
+- 模型发现缓存只记录连接身份（`credential:<id>` / `env:<name>` 或 token 指纹），不写入原始 token。
 
 ---
 
@@ -270,6 +272,7 @@ npm test             # vitest 全套
 │   ├── provider.ts     # provider/model transform + 模型发现与刷新 + remoteModelToInfo
 │   ├── requests.ts     # http.request / http.response / retry / 事件订阅
 │   ├── credentials.ts  # 凭证解析（requests 与 provider 共用）
+│   ├── key.ts          # 连接身份（accountKey）与 token 指纹
 │   ├── state.ts        # setup 闭包共享状态
 │   ├── auth-flow.ts    # state 请求 / token 轮询 / 刷新
 │   ├── models.ts       # /v3/config 发现 + DiscoveryCache + buildVariants

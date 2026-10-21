@@ -1,5 +1,6 @@
+import { createServer } from "node:http";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { registerRequests } from "../src/requests.js";
+import { registerRequests, RETRY_DELAYS_MS, RETRY_TIMEOUT_MS } from "../src/requests.js";
 import { createMockCtx, makeTestState } from "./helpers/mock-ctx.js";
 
 const b64url = (obj: object) => Buffer.from(JSON.stringify(obj)).toString("base64url");
@@ -374,6 +375,182 @@ describe("fix pass 回归", () => {
       const { value } = await readPromise;
       expect(new TextDecoder().decode(value)).toContain("碎片");
       await reader.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("请求快照生命周期", () => {
+  it("非 11133 的正常响应后快照被释放", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    const cleanup = await registerRequests(ctx, state);
+    const e: any = { sessionID: "s", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: new Request("https://x", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }) }) };
+    await triggerHook("http.request", e);
+    expect(state.requestSnapshots.size).toBe(1);
+    e.response = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    await triggerHook("http.response", e);
+    expect(state.requestSnapshots.size).toBe(0);
+    cleanup();
+  });
+
+  it("11133 重试成功后快照被释放", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const e: any = { sessionID: "s", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: chatRequest({ stream: true, messages: [] }) };
+      await triggerHook("http.request", e);
+      expect(state.requestSnapshots.size).toBe(1);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } })));
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(e.response.status).toBe(200);
+      expect(state.requestSnapshots.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("400 非 11133 原样返回后快照被释放", async () => {
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+    const state = makeTestState();
+    await registerRequests(ctx, state);
+    const e: any = { sessionID: "s", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+      request: chatRequest({ stream: true, messages: [] }) };
+    await triggerHook("http.request", e);
+    expect(state.requestSnapshots.size).toBe(1);
+    e.response = new Response(JSON.stringify({ code: 500 }), { status: 400, headers: { "content-type": "application/json" } });
+    await triggerHook("http.response", e);
+    expect(e.response.status).toBe(400);
+    expect(state.requestSnapshots.size).toBe(0);
+  });
+
+  it("11133 重试耗尽后快照被释放（快照活到全部尝试结束）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const e: any = { sessionID: "s", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: chatRequest({ stream: true, messages: [] }) };
+      await triggerHook("http.request", e);
+      expect(state.requestSnapshots.size).toBe(1);
+      const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } }));
+      vi.stubGlobal("fetch", fetchSpy);
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+      // 快照必须活到全部重试尝试结束（循环内读取的是局部 snapshot 常量）
+      expect(fetchSpy).toHaveBeenCalledTimes(RETRY_DELAYS_MS.length);
+      expect(e.response.status).toBe(400);
+      expect(state.requestSnapshots.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("11133 重试预算与响应体生命周期", () => {
+  it("重试成功后的长 SSE 不被重试预算截断", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = 'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n';
+      res.write(chunk);
+      const t = setInterval(() => res.write(chunk), 100);
+      res.on("close", () => clearInterval(t));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as any).port;
+    // 预算缩短到 1500ms：必须大于首次退避 1000ms（否则重试阶段在 fetch 前就被判超时），
+    // 又必须明显小于「首块之后等待 900ms」的观察窗口，才能暴露响应体被预算连带中止的缺陷。
+    const SHORT_BUDGET_MS = 1500;
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation(
+      (ms) => nativeTimeout(ms === RETRY_TIMEOUT_MS ? SHORT_BUDGET_MS : ms),
+    );
+    const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "dummy" } });
+    const state = makeTestState();
+    state.cfg.sse.enabled = false;
+    const cleanup = await registerRequests(ctx, state);
+    try {
+      const e: any = {
+        sessionID: "t", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: new Request(`http://127.0.0.1:${port}/c`, { method: "POST", body: JSON.stringify({ stream: true, messages: [] }) }),
+      };
+      await triggerHook("http.request", e);
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400 });
+      await triggerHook("http.response", e);
+      expect(e.response.status).toBe(200);
+      const reader = e.response.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      await new Promise((r) => setTimeout(r, 900));   // 超过被缩短的预算
+      // 单次 read() 可能命中封装层已缓冲的块，必须连续读多块：预算若仍牵着 body，
+      // 缓冲耗尽后必然抛 AbortError。
+      for (let i = 0; i < 5; i++) {
+        const next = await reader.read();
+        expect(next.done).toBe(false);
+        expect(next.value?.byteLength ?? 0).toBeGreaterThan(0);
+      }
+      await reader.cancel();
+    } finally {
+      cleanup(); spy.mockRestore(); server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }, 15000);
+
+  it("退避总时长覆盖全部重试尝试", () => {
+    const total = RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(RETRY_DELAYS_MS).toHaveLength(4);
+    expect(total).toBe(40000);
+    expect(RETRY_TIMEOUT_MS).toBe(45000);
+    expect(total).toBeLessThan(RETRY_TIMEOUT_MS);
+  });
+
+  it("重试耗尽：最后返回的响应仍随用户取消中止，被丢弃的尝试不再挂监听", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx, triggerHook } = createMockCtx({ credential: { type: "key", key: "k" } });
+      const state = makeTestState();
+      await registerRequests(ctx, state);
+      const ac = new AbortController();
+      const e: any = {
+        sessionID: "s1", model: { providerID: "codebuddy", id: "auto" }, kind: "primary",
+        request: new Request("https://copilot.tencent.com/v2/chat/completions", {
+          method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: ac.signal,
+        }),
+      };
+      await triggerHook("http.request", e);   // 建立快照
+      const signals: AbortSignal[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (_input: any, init: any) => {
+        signals.push(init.signal as AbortSignal);
+        return new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      }));
+      e.response = new Response(JSON.stringify({ code: 11133 }), { status: 400, headers: { "content-type": "application/json" } });
+      const pending = triggerHook("http.response", e);
+      await vi.runAllTimersAsync();
+      await pending;
+
+      expect(signals).toHaveLength(4);
+      expect(e.response.status).toBe(400);
+      expect(JSON.parse(await e.response.text()).code).toBe(11133);
+
+      // 最后返回的响应仍绑定用户取消
+      expect(signals[3]!.aborted).toBe(false);
+      ac.abort();
+      expect(signals[3]!.aborted).toBe(true);
+      // 被丢弃的前几次尝试已解除用户取消监听，不会随用户取消再触发
+      expect(signals[0]!.aborted).toBe(false);
+      expect(signals[1]!.aborted).toBe(false);
+      expect(signals[2]!.aborted).toBe(false);
     } finally {
       vi.useRealTimers();
     }
