@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines: ^22.19.0 || >=24.0.0；发布线用 24，两条都守
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - name: Pack smoke
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const required = ["dist/index.js","dist/index.d.ts","index.js","package.json","README.md","LICENSE"];
+            const files = new Set(require("./pack.json")[0].files.map(f => f.path));
+            const missing = required.filter(f => !files.has(f));
+            if (missing.length) { console.error("missing from tarball:", missing.join(", ")); process.exit(1); }
+            const leaked = [...files].filter(f => /^(src|test)\//.test(f));
+            if (leaked.length) { console.error("source leaked into tarball:", leaked.join(", ")); process.exit(1); }
+            console.log(`pack ok: ${files.size} files`);
+          '

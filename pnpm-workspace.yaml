@@ -1,0 +1,7 @@
+minimumReleaseAgeExclude:
+  - '@opencode/ai@2.2.5'
+  - '@opencode/client@2.2.5'
+  - '@opencode/plugin@2.2.5'
+  - '@opencode/protocol@2.2.5'
+  - '@opencode/schema@2.2.5'
+  - '@opencode/util@2.2.5'

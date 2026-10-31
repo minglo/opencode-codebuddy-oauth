@@ -17,11 +17,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: pnpm test
       - name: Skip if already published
         run: |
           PKG="$(node -p "require('./package.json').name")"
@@ -30,5 +37,7 @@ jobs:
             echo "version $VER already published, skip"
             echo "skip=true" >> "$GITHUB_ENV"
           fi
-      - run: npm publish --provenance
+      # npm 只负责打包上传：--ignore-scripts 跳过 prepublishOnly，
+      # 避免 npm 去调用 pnpm 脚本；构建与测试已在上面显式完成。
+      - run: npm publish --provenance --ignore-scripts
         if: env.skip != 'true'

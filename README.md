@@ -251,14 +251,15 @@ OpenCode 每个 turn 都会把完整 message history 重发到 `/chat/completion
 ## 构建与开发
 
 ```bash
-npm install
-npm run build        # tsup → dist/（ESM + d.ts + sourcemap）
-npm test             # vitest 全套
+pnpm install
+pnpm run build        # tsdown → dist/（ESM + d.ts + sourcemap）
+pnpm run typecheck    # tsc --noEmit
+pnpm test             # vitest 全套
 ```
 
-`prepublishOnly` 会先跑 `npm test && npm run build`，发布前无需额外步骤。`npm pack` 产物包含 `dist/` + `index.js` + `README.md` + `LICENSE` + `package.json`（`files: ["dist", "index.js"]` 白名单；`index.js` 是目录形式插件的入口，必须随包发布）。
+`prepublishOnly` 会先跑 `pnpm test && pnpm run build`，发布前无需额外步骤。日常依赖用 pnpm（`pnpm-lock.yaml`），发布用 `npm publish`（`package-lock.json` 不参与）。`npm pack` 产物包含 `dist/` + `index.js` + `README.md` + `LICENSE` + `package.json`（`files: ["dist", "index.js"]` 白名单；`index.js` 是目录形式插件的入口，必须随包发布）。
 
-本地开发：`plugins` 指向仓库目录即可，改完 `npm run build` 后重启 OpenCode 生效。
+本地开发：`plugins` 指向仓库目录即可，改完 `pnpm run build` 后重启 OpenCode 生效。
 
 ### 目录结构
 

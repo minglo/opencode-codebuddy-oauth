@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { requestAuthState, pollForToken, refreshAccessToken } from "../src/auth-flow.js";
+import { POLL_INTERVAL_MS } from "../src/config.js";
 import { fetchJson } from "../src/fetch-json.js";
 
 vi.mock("../src/fetch-json.js", () => ({ fetchJson: vi.fn() }));
@@ -33,13 +34,16 @@ describe("requestAuthState", () => {
 });
 
 describe("pollForToken 先查后睡", () => {
-  beforeEach(()=> vi.mocked(fetchJson).mockReset());
+  beforeEach(()=> { vi.mocked(fetchJson).mockReset(); vi.useFakeTimers(); });
+  afterEach(()=> vi.useRealTimers());
   it("首查即成功时不 sleep 3s（计时）", async () => {
     vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:0, data:{ accessToken:"a", refreshToken:"r", expiresIn:3600 } } } as any);
     const start = Date.now();
     const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+10000);
     expect(res?.accessToken).toBe("a");
-    expect(Date.now() - start).toBeLessThan(1000);
+    // fake timers 下时钟不动 = 未发生 sleep
+    expect(Date.now() - start).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
     expect(vi.mocked(fetchJson)).toHaveBeenCalledTimes(1);
   });
   it("自定义 server 时 URL 跟随 serverUrl（非硬编码默认主机）", async () => {
@@ -50,7 +54,12 @@ describe("pollForToken 先查后睡", () => {
   it("首查失败后才 sleep 再查", async () => {
     vi.mocked(fetchJson).mockResolvedValueOnce({ ok:true, data:{ code:1, data:{} } } as any)
       .mockResolvedValueOnce({ ok:true, data:{ code:0, data:{ accessToken:"a", refreshToken:"r", expiresIn:3600 } } } as any);
-    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+5000);
+    const pending = pollForToken("https://copilot.tencent.com", "s1", Date.now()+5000);
+    // 首查已发生、定时器已挂起
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    const res = await pending;
     expect(res?.accessToken).toBe("a");
     expect(vi.mocked(fetchJson)).toHaveBeenCalledTimes(2);
   });
@@ -61,8 +70,9 @@ describe("pollForToken 先查后睡", () => {
   });
   it("expiresAt 到期返回 null", async () => {
     vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:1 } } as any);
-    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+10);
-    expect(res).toBeNull();
+    const pending = pollForToken("https://copilot.tencent.com", "s1", Date.now()+10);
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(await pending).toBeNull();
   });
 });
 

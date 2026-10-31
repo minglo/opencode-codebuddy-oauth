@@ -1,7 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { createMockCtx } from "./helpers/mock-ctx.js";
 
 describe("V2 setup 骨架", () => {
+  // 错误隔离用例会故意抛错并走 console.error；静音输出，避免被误读为测试失败。
+  afterEach(() => vi.restoreAllMocks());
+
   it("默认导出为 Plugin.define 形态 {id, setup}", async () => {
     vi.resetModules();
     const mod: any = await import("../src/index.js");
@@ -22,11 +25,13 @@ describe("V2 setup 骨架", () => {
     vi.resetModules();
     const mod: any = await import("../src/index.js");
     const { ctx } = createMockCtx();
+    const errLog = vi.spyOn(console, "error").mockImplementation(() => {});
     ctx.integration.transform = vi.fn(async () => { throw new Error("boom"); });
     const cleanup = await mod.default.setup(ctx);
     expect(typeof cleanup).toBe("function");
     expect(ctx.provider.transform).toHaveBeenCalled();
     expect(ctx.session.hook).toHaveBeenCalledWith("http.request", expect.any(Function), expect.anything());
+    expect(errLog).toHaveBeenCalledWith("[codebuddy] integration 注册失败:", expect.any(Error));
     cleanup();
   });
 
@@ -34,9 +39,11 @@ describe("V2 setup 骨架", () => {
     vi.resetModules();
     const mod: any = await import("../src/index.js");
     const { ctx } = createMockCtx();
+    const errLog = vi.spyOn(console, "error").mockImplementation(() => {});
     ctx.provider.transform = vi.fn(async () => { throw new Error("boom"); });
     const cleanup = await mod.default.setup(ctx);
     expect(ctx.session.hook).toHaveBeenCalledWith("http.request", expect.any(Function), expect.anything());
+    expect(errLog).toHaveBeenCalledWith("[codebuddy] provider 注册失败:", expect.any(Error));
     cleanup();
   });
 });
